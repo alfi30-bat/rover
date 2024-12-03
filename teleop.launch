@@ -1,0 +1,34 @@
+<launch>
+  <arg name="joy_config" default="ps3" />
+  <arg name="joy_dev" default="/dev/input/js0" />
+  <arg name="config_filepath" default="$(find teleop_twist_joy)/config/$(arg joy_config).config.yaml" />
+  <arg name="joy_topic" default="joy" />
+  
+  <node pkg="joy" type="joy_node" name="joy_node">
+    <param name="dev" value="$(arg joy_dev)" />
+    <param name="deadzone" value="0.3" />
+    <param name="autorepeat_rate" value="20" />
+    <remap from="joy" to="$(arg joy_topic)" />
+      <param name="~publish_joy" value="{axes: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0], buttons: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}" />
+  <param name="~expect_cmd_vel" value="{linear: {x: 0.5, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}" />
+
+  </node>
+
+
+
+  <node name="teleop_twist_joy" pkg="teleop_twist_joy" type="teleop_node" output="screen">
+    <rosparam command="load" file="$(arg config_filepath)" />
+    <remap from="joy" to="$(arg joy_topic)" />
+    <param name="axis_linear" value="1"/>
+    <param name="scale_linear" value="2"/>
+    <param name="axis_angular" value="0"/>
+    <param name="scale_angular" value="2.0"/>
+    <param name="enable_button" value="0"/> 
+    <param name="enable_turbo_button" value="1"/>
+
+
+    
+  </node>
+
+
+</launch>
