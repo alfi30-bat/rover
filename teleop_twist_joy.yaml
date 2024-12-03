@@ -1,0 +1,16 @@
+joy_config: xbox
+
+# Axes mappings for using one joystick (left joystick)
+axis_linear: 1                 # Left Stick Vertical (forward/backward)
+scale_linear: 0.5              # Normal speed
+scale_linear_turbo: 1.0        # Turbo speed
+
+axis_angular: 0                # Left Stick Horizontal (left/right)
+scale_angular: 1.0             # Normal turning speed
+scale_angular_turbo: 2.0       # Turbo turning speed
+
+# Turbo mode button mapping
+enable_turbo_button: 1         # B button to enable turbo mode (dynamic scaling)
+
+# Deadzone to prevent small unintended movements
+axis_deadzone: 0.1             # Value to ignore minor movements
