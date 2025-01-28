@@ -1,0 +1,613 @@
+#include <ros.h>
+#include <std_msgs/Int16.h>
+#include <geometry_msgs/Twist.h>
+#include "CytronMotorDriver.h"
+
+
+// Handles startup and shutdown of ROS
+ros::NodeHandle nh;
+
+////////////////// Tick Data Publishing Variables and Constants ///////////////
+
+// Encoder output to Arduino Interrupt pin. Tracks the tick count.
+#define ENC_IN_LEFT1_A 2
+#define ENC_IN_LEFT2_A 16
+#define ENC_IN_RIGHT1_A 3
+#define ENC_IN_RIGHT2_A 17
+
+// Other encoder output to Arduino to keep track of wheel direction
+// Tracks the direction of rotation.
+#define ENC_IN_LEFT1_B 20
+#define ENC_IN_LEFT2_B 18
+#define ENC_IN_RIGHT1_B 19
+#define ENC_IN_RIGHT2_B 21
+
+
+// True = Forward; False = Reverse
+boolean Direction_left = true;
+boolean Direction_right = true;
+
+// Minumum and maximum values for 16-bit integers
+// Range of 65,535
+const int encoder_minimum = -32768;
+const int encoder_maximum = 32767;
+
+// Keep track of the number of wheel ticks
+std_msgs::Int16 right_wheel_tick_count;
+ros::Publisher rightPub("right_ticks", &right_wheel_tick_count);
+
+std_msgs::Int16 left_wheel_tick_count;
+ros::Publisher leftPub("left_ticks", &left_wheel_tick_count);
+
+// Time interval for measurements in milliseconds
+const int interval = 30;
+long previousMillis = 0;
+long currentMillis = 0;
+
+////////////////// Motor Controller Variables and Constants ///////////////////
+
+// Motor A connections Left Motor
+const int pwm1 = 6;
+const int dir1 = 7;
+CytronMD motor1(PWM_DIR, 6, 7);  // PWM 1 = Pin 3, DIR 1 = Pin 4
+
+// Motor B connections Right Motor
+const int pwm2 = 24;
+const int dir2 = 25;
+CytronMD motor2(PWM_DIR, 24, 25);
+
+// Motor C connections
+const int pwm3 = 26;
+const int dir3 = 27;
+CytronMD motor3(PWM_DIR, 26, 27);
+
+// Motor D connections
+const int pwm4 = 30;
+const int dir4 = 31;
+CytronMD motor4(PWM_DIR, 30, 31);
+
+// How much the PWM value can change each cycle
+const int PWM_INCREMENT = 1;
+
+// Number of ticks per wheel revolution. We won't use this in this code.
+const int TICKS_PER_REVOLUTION = 668;
+
+// Wheel radius in meters
+const double WHEEL_RADIUS = 0.265;
+
+// Distance from center of the left tire to the center of the right tire in m
+const double WHEEL_BASE = 0.30;
+
+// Number of ticks a wheel makes moving a linear distance of 1 meter
+// This value was measured manually.
+const double TICKS_PER_METER = 2126; // Originally 2880
+
+// Proportional constant, which was measured by measuring the
+// PWM-Linear Velocity relationship for the robot.
+const int K_P = 278;
+
+// Y-intercept for the PWM-Linear Velocity relationship for the robot
+const int b = 52;
+
+// Correction multiplier for drift. Chosen through experimentation.
+const int DRIFT_MULTIPLIER = 120;
+
+// Turning PWM output (0 = min, 255 = max for PWM values)
+//const int PWM_TURN = 225;
+
+// Set maximum and minimum limits for the PWM values
+const int PWM_MIN = 100; // about 0.1 m/s
+const int PWM_MAX = 255; // about 0.172 m/s
+//const int PWM_BACKWARD = 225;
+
+// Set linear velocity and PWM variable values for each wheel
+double velLeftWheel = 0;
+double velRightWheel = 0;
+double pwmLeftReq = 0;
+double pwmRightReq = 0;
+
+// Record the time that the last velocity command was received
+double lastCmdVelReceived = 0;
+
+/////////////////////// Tick Data Publishing Functions ////////////////////////
+
+void right_wheel_tick() {
+    // Read the value for the encoder for the right wheels and combine them
+    int val1 = digitalRead(ENC_IN_RIGHT1_B);
+    int val2 = digitalRead(ENC_IN_RIGHT2_B);
+    int combined_val = (val1 + val2) / 2;
+    
+    if (combined_val == LOW) {
+        Direction_right = false; // Reverse
+    } else {
+        Direction_right = true; // Forward
+    }
+   
+    if (Direction_right) {
+        if (right_wheel_tick_count.data == encoder_maximum) {
+            right_wheel_tick_count.data = encoder_minimum;
+        } else {
+            right_wheel_tick_count.data++;  
+        }    
+    } else {
+        if (right_wheel_tick_count.data == encoder_minimum) {
+            right_wheel_tick_count.data = encoder_maximum;
+        } else {
+            right_wheel_tick_count.data--;  
+        }  
+    }
+}
+
+// Increment the number of ticks for all wheels
+void left_wheel_tick() {
+    // Read the value for the encoder for the left wheels and combine them
+    int val1 = digitalRead(ENC_IN_LEFT1_B);
+    int val2 = digitalRead(ENC_IN_LEFT2_B);
+    int combined_val = (val1 + val2) / 2;
+
+    if (combined_val == LOW) {
+        Direction_left = true; // Reverse
+    } else {
+        Direction_left = false; // Forward
+    }
+   
+    if (Direction_left) {
+        if (left_wheel_tick_count.data == encoder_maximum) {
+            left_wheel_tick_count.data = encoder_minimum;
+        } else {
+            left_wheel_tick_count.data++;  
+        }  
+    } else {
+        if (left_wheel_tick_count.data == encoder_minimum) {
+            left_wheel_tick_count.data = encoder_maximum;
+        } else {
+            left_wheel_tick_count.data--;  
+        }  
+    }
+}
+
+/////////////////////// Motor Controller Functions ////////////////////////////
+ 
+// Calculate the left wheel linear velocity in m/s every time a
+// tick count message is rpublished on the /left_ticks topic.
+/////////////////////// Motor Controller Functions ////////////////////////////
+ 
+// Calculate the left wheel linear velocity in m/s every time a
+// tick count message is rpublished on the /left_ticks topic.
+void calc_vel_left_wheel(){
+   
+  // Previous timestamp
+  static double prevTime = 0;
+   
+  // Variable gets created and initialized the first time a function is called.
+  static int prevLeftCount = 0;
+ 
+  // Manage rollover and rollunder when we get outside the 16-bit integer range
+  int numOfTicks = (65535 + left_wheel_tick_count.data - prevLeftCount) % 65535;
+ 
+  // If we have had a big jump, it means the tick count has rolled over.
+  if (numOfTicks > 10000) {
+        numOfTicks = 0 - (65535 - numOfTicks);
+  }
+ 
+  // Calculate wheel velocity in meters per second
+  velLeftWheel = numOfTicks/TICKS_PER_METER/((millis()/1000)-prevTime);
+ 
+  // Keep track of the previous tick count
+  prevLeftCount = left_wheel_tick_count.data;
+ 
+  // Update the timestamp
+  prevTime = (millis()/1000);
+ 
+}
+ 
+// Calculate the right wheel linear velocity in m/s every time a
+// tick count message is published on the /right_ticks topic.
+void calc_vel_right_wheel(){
+   
+  // Previous timestamp
+  static double prevTime = 0;
+   
+  // Variable gets created and initialized the first time a function is called.
+  static int prevRightCount = 0;
+ 
+  // Manage rollover and rollunder when we get outside the 16-bit integer range
+  int numOfTicks = (65535 + right_wheel_tick_count.data - prevRightCount) % 65535;
+ 
+  if (numOfTicks > 10000) {
+        numOfTicks = 0 - (65535 - numOfTicks);
+  }
+ 
+  // Calculate wheel velocity in meters per second
+  velRightWheel = numOfTicks/TICKS_PER_METER/((millis()/1000)-prevTime);
+ 
+  prevRightCount = right_wheel_tick_count.data;
+   
+  prevTime = (millis()/1000);
+ 
+}
+ 
+// Take the velocity command as input and calculate the PWM values.
+void calc_pwm_values(const geometry_msgs::Twist& cmdVel) {
+   
+  // Record timestamp of last velocity command received
+  lastCmdVelReceived = (millis()/1000);
+   
+  // Calculate the PWM value given the desired velocity
+  double basePWM = K_P * fabs(cmdVel.linear.x) + b;
+  //double basePWM1 = K_P * fabs(cmdVel.angular.z) + b;
+  double basePWM1 = 160;
+  
+  if (cmdVel.linear.x >= 0) { // Moving forward
+    pwmLeftReq = basePWM;
+    pwmRightReq = basePWM;
+    motor1.setSpeed(basePWM);
+    motor2.setSpeed(basePWM);
+    motor3.setSpeed(basePWM);
+    motor4.setSpeed(basePWM);
+
+  } 
+  
+  else { // Moving backward
+    pwmLeftReq = -basePWM;
+    pwmRightReq = -basePWM;
+    motor1.setSpeed(-basePWM);
+    motor2.setSpeed(-basePWM);
+    motor3.setSpeed(-basePWM);
+    motor4.setSpeed(-basePWM);
+
+  }
+  if (cmd_vel.linear.y!=0 && cmdVel.angular.z ==0.0){
+    if (cmd_vel.linear.x==0){
+        if (cmd_vel.linear.y >0){
+        motor5.setSpeed(rotate);
+        motor6.setSpeed(rotate);
+        motor7.setSpeed(rotate);
+        motor8.setSpeed(rotate);
+        }
+        else{
+        motor5.setSpeed(-rotate);
+        motor6.setSpeed(-rotate);
+        motor7.setSpeed(-rotate);
+        motor8.setSpeed(-rotate);
+        }   
+    }else if (cmd_vel.linear.x>0){
+        if (cmd_vel.linear.y >0){
+        pwmLeftReq = basePWM;
+        pwmRightReq = basePWM;
+        motor1.setSpeed(basePWM);
+        motor2.setSpeed(basePWM);
+        motor3.setSpeed(basePWM);
+        motor4.setSpeed(basePWM);            
+        motor5.setSpeed(rotate);
+        motor6.setSpeed(rotate);
+        motor7.setSpeed(rotate);
+        motor8.setSpeed(rotate);
+        }
+        else{
+        pwmLeftReq = basePWM;
+        pwmRightReq = basePWM;
+        motor1.setSpeed(basePWM);
+        motor2.setSpeed(basePWM);
+        motor3.setSpeed(basePWM);
+        motor4.setSpeed(basePWM);               
+        motor5.setSpeed(-rotate);
+        motor6.setSpeed(-rotate);
+        motor7.setSpeed(-rotate);
+        motor8.setSpeed(-rotate);
+        }  
+    }else{
+        if (cmd_vel.linear.y >0){
+        pwmLeftReq = -basePWM;
+        pwmRightReq = -basePWM;
+        motor1.setSpeed(-basePWM);
+        motor2.setSpeed(-basePWM);
+        motor3.setSpeed(-basePWM);
+        motor4.setSpeed(-basePWM);            
+        motor5.setSpeed(rotate);
+        motor6.setSpeed(rotate);
+        motor7.setSpeed(rotate);
+        motor8.setSpeed(rotate);
+        }
+        else{
+        pwmLeftReq = -basePWM;
+        pwmRightReq = -basePWM;
+        motor1.setSpeed(-basePWM);
+        motor2.setSpeed(-basePWM);
+        motor3.setSpeed(-basePWM);
+        motor4.setSpeed(-basePWM);               
+        motor5.setSpeed(-rotate);
+        motor6.setSpeed(-rotate);
+        motor7.setSpeed(-rotate);
+        motor8.setSpeed(-rotate);
+        }  
+    }
+
+  }
+  if (cmdVel.angular.z != 0.0 && cmd_vel.linear.y==0) {
+    if (cmdVel.linear.x >= 0) { // Forward motion
+      // Turn left
+      if (cmdVel.angular.z > 0.0) {
+        pwmLeftReq = -basePWM1;
+        pwmRightReq = basePWM1;
+        motor1.setSpeed(-basePWM1);
+        motor2.setSpeed(basePWM1);
+        motor3.setSpeed(-basePWM1);
+        motor4.setSpeed(basePWM1);
+
+      }
+      else {
+        pwmLeftReq = basePWM1;
+        pwmRightReq = -basePWM1;
+        motor1.setSpeed(basePWM1);
+        motor2.setSpeed(-basePWM1);
+        motor3.setSpeed(basePWM1);
+        motor4.setSpeed(-basePWM1);
+      }
+   }else{
+      if (cmdVel.angular.z > 0.0) {
+        pwmLeftReq = -basePWM1;
+        pwmRightReq = basePWM1;
+        motor1.setSpeed(-basePWM1);
+        motor2.setSpeed(basePWM1);
+        motor3.setSpeed(-basePWM1);
+        motor4.setSpeed(basePWM1);
+
+      }
+      else{
+        pwmLeftReq = basePWM1;
+        pwmRightReq = -basePWM1;
+        motor1.setSpeed(basePWM1);
+        motor2.setSpeed(-basePWM1);
+        motor3.setSpeed(basePWM1);
+        motor4.setSpeed(-basePWM1);
+      }
+    }
+  }
+  // Go straight
+    
+    static double prevDiff = 0;
+    static double prevPrevDiff = 0;
+    double currDifference = velLeftWheel - velRightWheel;
+    double avgDifference = (prevDiff+prevPrevDiff+currDifference)/3;
+    prevPrevDiff = prevDiff;
+    prevDiff = currDifference;
+    
+    if (cmdVel.angular.z == 0) {
+        if (cmdVel.linear.x >= 0) { // Moving forward
+            pwmLeftReq += (int)(avgDifference * DRIFT_MULTIPLIER);
+            pwmRightReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
+            motor1.setSpeed(pwmLeftReq);
+            motor2.setSpeed(pwmRightReq);
+            motor3.setSpeed(pwmLeftReq);
+            motor4.setSpeed(pwmRightReq);
+        } else { // Moving backward
+            pwmLeftReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
+            pwmRightReq += (int)(avgDifference * DRIFT_MULTIPLIER);
+            motor1.setSpeed(pwmLeftReq);
+            motor2.setSpeed(pwmRightReq);
+            motor3.setSpeed(pwmLeftReq);
+            motor4.setSpeed(pwmRightReq);
+        }
+    } else {
+        if (cmdVel.angular.z > 0) { // Turning right
+            pwmLeftReq += (int)(avgDifference * DRIFT_MULTIPLIER);
+            pwmRightReq += (int)(avgDifference * DRIFT_MULTIPLIER);
+            motor1.setSpeed(pwmLeftReq);
+            motor2.setSpeed(pwmRightReq);
+            motor3.setSpeed(pwmLeftReq);
+            motor4.setSpeed(pwmRightReq);
+
+        } else { // Turning left
+            pwmLeftReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
+            pwmRightReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
+            motor1.setSpeed(pwmLeftReq);
+            motor2.setSpeed(pwmRightReq);
+            motor3.setSpeed(pwmLeftReq);
+            motor4.setSpeed(pwmRightReq);
+        }
+    }
+
+    // Correct PWM values of both wheels to make the vehicle go straight
+    // Additional corrections...
+  
+    // Handle low PWM values
+    if (abs(pwmLeftReq) < PWM_MIN) {
+        pwmLeftReq = 0;
+        motor1.setSpeed(0);
+        motor3.setSpeed(0);
+    }
+    if (abs(pwmRightReq) < PWM_MIN) {
+        pwmRightReq = 0;  
+        motor2.setSpeed(0);
+        motor4.setSpeed(0);
+    }  
+}
+ 
+void set_pwm_values() {
+ 
+  // These variables will hold our desired PWM values
+  static int pwmLeftOut = 0;
+  static int pwmRightOut = 0;
+ 
+  // If the required PWM is of opposite sign as the output PWM, we want to
+  // stop the car before switching direction
+  static bool stopped = false;
+  if ((pwmLeftReq * velLeftWheel < 0 && pwmLeftOut != 0) ||
+      (pwmRightReq * velRightWheel < 0 && pwmRightOut != 0)) {
+    pwmLeftReq = 0;
+    pwmRightReq = 0;
+  }
+ 
+  // Set the direction of the motors
+    if (pwmLeftReq > 0 && pwmRightReq > 0) {
+    digitalWrite(dir1, HIGH);  
+    digitalWrite(dir2, HIGH);
+    digitalWrite(dir3, HIGH);  
+    digitalWrite(dir4, HIGH);
+
+
+ 
+  }
+  else if (pwmLeftReq < 0 && pwmRightReq < 0) {
+    digitalWrite(dir1, LOW);
+    digitalWrite(dir2, LOW);
+    digitalWrite(dir3, LOW);
+    digitalWrite(dir4, LOW);
+
+
+  }
+  else if (pwmLeftReq < 0 && pwmRightReq > 0) {
+    digitalWrite(dir1, LOW);
+    digitalWrite(dir2, HIGH);
+    digitalWrite(dir3, LOW);
+    digitalWrite(dir4, HIGH);
+
+ 
+  }
+  else if (pwmLeftReq > 0 && pwmRightReq < 0) {
+    digitalWrite(dir1, HIGH);
+    digitalWrite(dir2, LOW);
+    digitalWrite(dir3, HIGH);
+    digitalWrite(dir4, LOW);
+
+ 
+  }
+
+  else {
+    motor1.setSpeed(0);
+    motor2.setSpeed(0);
+    motor2.setSpeed(0);
+    motor4.setSpeed(0);
+
+
+  }
+ 
+ 
+
+ 
+ 
+  // Increase the required PWM if the robot is not moving
+  if (pwmLeftReq != 0 && velLeftWheel == 0) {
+    pwmLeftReq *= 1.5;
+  }
+  if (pwmRightReq != 0 && velRightWheel == 0) {
+    pwmRightReq *= 1.5;
+  }
+ 
+  // Calculate the output PWM value by making slow changes to the current value
+  if (abs(pwmLeftReq) > pwmLeftOut) {
+    pwmLeftOut += PWM_INCREMENT;
+  }
+  else if (abs(pwmLeftReq) < pwmLeftOut) {
+    pwmLeftOut -= PWM_INCREMENT;
+  }
+  else{}
+   
+  if (abs(pwmRightReq) > pwmRightOut) {
+    pwmRightOut += PWM_INCREMENT;
+  }
+  else if(abs(pwmRightReq) < pwmRightOut) {
+    pwmRightOut -= PWM_INCREMENT;
+  }
+  else{}
+ 
+  // Conditional operator to limit PWM output at the maximum
+  pwmLeftOut = (pwmLeftOut > PWM_MAX) ? PWM_MAX : pwmLeftOut;
+  pwmRightOut = (pwmRightOut > PWM_MAX) ? PWM_MAX : pwmRightOut;
+ 
+  // PWM output cannot be less than 0
+  pwmLeftOut = (pwmLeftOut < 0) ? 0 : pwmLeftOut;
+  pwmRightOut = (pwmRightOut < 0) ? 0 : pwmRightOut;
+ 
+  // Set the PWM value on the pins
+  analogWrite(pwm1, pwmLeftOut);
+  analogWrite(pwm2, pwmRightOut);
+}
+ 
+// Set up ROS subscriber to the velocity command
+ros::Subscriber<geometry_msgs::Twist> subCmdVel("cmd_vel", &calc_pwm_values );
+ 
+void setup() {
+ 
+  // Set pin states of the encoder
+  pinMode(ENC_IN_LEFT1_A , INPUT_PULLUP);
+  pinMode(ENC_IN_LEFT1_B , INPUT);
+  pinMode(ENC_IN_RIGHT1_A , INPUT_PULLUP);
+  pinMode(ENC_IN_RIGHT1_B , INPUT);
+  pinMode(ENC_IN_LEFT2_A , INPUT_PULLUP);
+  pinMode(ENC_IN_LEFT2_B , INPUT);
+  pinMode(ENC_IN_RIGHT2_A , INPUT_PULLUP);
+  pinMode(ENC_IN_RIGHT2_B , INPUT);
+
+ 
+  // Every time the pin goes high, this is a tick
+  attachInterrupt(digitalPinToInterrupt(ENC_IN_LEFT1_A), left_wheel_tick, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_IN_LEFT2_A), left_wheel_tick, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_IN_RIGHT1_A), right_wheel_tick, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_IN_RIGHT2_A), right_wheel_tick, RISING);
+   
+  // Motor control pins are outputs
+  pinMode(pwm1, OUTPUT);
+  pinMode(dir1, OUTPUT);
+  pinMode(pwm2, OUTPUT);
+  pinMode(dir2, OUTPUT);
+  pinMode(pwm3, OUTPUT);
+  pinMode(dir3, OUTPUT);
+  pinMode(pwm4, OUTPUT);
+  pinMode(dir4, OUTPUT);
+
+
+ 
+  // Turn off motors - Initial state
+  digitalWrite(pwm1, LOW);
+  digitalWrite(pwm2, LOW);
+  digitalWrite(pwm3, LOW);
+  digitalWrite(pwm4, LOW);
+ 
+  // Set the motor speed
+  analogWrite(pwm1, 0);
+  analogWrite(pwm2, 0);
+  analogWrite(pwm3, 0);
+  analogWrite(pwm4, 0);
+
+ 
+  // ROS Setup
+  nh.getHardware()->setBaud(115200);
+  nh.initNode();
+  nh.advertise(rightPub);
+  nh.advertise(leftPub);
+  nh.subscribe(subCmdVel);
+}
+ 
+void loop() {
+   
+  nh.spinOnce();
+   
+  // Record the time
+  currentMillis = millis();
+ 
+  // If the time interval has passed, publish the number of ticks,
+  // and calculate the velocities.
+  if (currentMillis - previousMillis > interval) {
+     
+    previousMillis = currentMillis;
+ 
+    // Publish tick counts to topics
+    leftPub.publish( &left_wheel_tick_count );
+    rightPub.publish( &right_wheel_tick_count );
+ 
+    // Calculate the velocity of the right and left wheels
+    calc_vel_right_wheel();
+    calc_vel_left_wheel();
+     
+  }
+   
+  // Stop the car if there are no cmd_vel messages
+  if((millis()/1000) - lastCmdVelReceived > 1) {
+    pwmLeftReq = 0;
+    pwmRightReq = 0;
+  }
+ 
+  set_pwm_values();
+}
