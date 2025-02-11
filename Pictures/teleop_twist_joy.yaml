@@ -1,0 +1,17 @@
+joy_config: xbox
+
+
+      axis_linear:
+        x: 1
+        y: 2
+      scale_linear:
+        x: 1.0
+        y: 4.0
+      axis_angular: 0
+      scale_angular: 3.0
+      enable_button: 0  
+
+             # Button to enable movement
+enable_turbo_button: 1         # Button to enable turbo mode
+
+axis_deadzone: 0.3             # Deadzone for minor movements
