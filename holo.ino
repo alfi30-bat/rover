@@ -2,7 +2,7 @@
 #include <std_msgs/Int16.h>
 #include <geometry_msgs/Twist.h>
 #include "CytronMotorDriver.h"
-
+int pwmup =120;
 
 // Handles startup and shutdown of ROS
 ros::NodeHandle nh;
@@ -65,7 +65,22 @@ CytronMD motor3(PWM_DIR, 26, 27);
 const int pwm4 = 30;
 const int dir4 = 31;
 CytronMD motor4(PWM_DIR, 30, 31);
+const int pwm5 = 32;
+const int dir5 = 33;
+CytronMD motor5(PWM_DIR, 32, 33);
 
+// Motor D connections
+const int pwm6 = 34;
+const int dir6 = 35;
+CytronMD motor6(PWM_DIR, 34, 35);
+const int pwm7 = 36;
+const int dir7 = 37;
+CytronMD motor7(PWM_DIR, 36, 37);
+
+// Motor D connections
+const int pwm8 = 38;
+const int dir8 = 39;
+CytronMD motor8(PWM_DIR, 38, 39);
 // How much the PWM value can change each cycle
 const int PWM_INCREMENT = 1;
 
@@ -94,7 +109,7 @@ const int DRIFT_MULTIPLIER = 120;
 
 // Turning PWM output (0 = min, 255 = max for PWM values)
 //const int PWM_TURN = 225;
-
+long rotate = 120;
 // Set maximum and minimum limits for the PWM values
 const int PWM_MIN = 100; // about 0.1 m/s
 const int PWM_MAX = 255; // about 0.172 m/s
@@ -115,7 +130,7 @@ void right_wheel_tick() {
     // Read the value for the encoder for the right wheels and combine them
     int val1 = digitalRead(ENC_IN_RIGHT1_B);
     int val2 = digitalRead(ENC_IN_RIGHT2_B);
-    int combined_val = (val1 + val2) / 2;
+    int combined_val = val1;
     
     if (combined_val == LOW) {
         Direction_right = false; // Reverse
@@ -143,7 +158,7 @@ void left_wheel_tick() {
     // Read the value for the encoder for the left wheels and combine them
     int val1 = digitalRead(ENC_IN_LEFT1_B);
     int val2 = digitalRead(ENC_IN_LEFT2_B);
-    int combined_val = (val1 + val2) / 2;
+    int combined_val = val1;
 
     if (combined_val == LOW) {
         Direction_left = true; // Reverse
@@ -237,8 +252,8 @@ void calc_pwm_values(const geometry_msgs::Twist& cmdVel) {
   double basePWM = K_P * fabs(cmdVel.linear.x) + b;
   //double basePWM1 = K_P * fabs(cmdVel.angular.z) + b;
   double basePWM1 = 160;
-  
-  if (cmdVel.linear.x >= 0) { // Moving forward
+
+  if (cmdVel.linear.x > 0) { // Moving forward
     pwmLeftReq = basePWM;
     pwmRightReq = basePWM;
     motor1.setSpeed(basePWM);
@@ -255,158 +270,165 @@ void calc_pwm_values(const geometry_msgs::Twist& cmdVel) {
     motor2.setSpeed(-basePWM);
     motor3.setSpeed(-basePWM);
     motor4.setSpeed(-basePWM);
+    
 
   }
-  if (cmd_vel.linear.y!=0 && cmdVel.angular.z ==0.0){
-    if (cmd_vel.linear.x==0){
-        if (cmd_vel.linear.y >0){
-        motor5.setSpeed(rotate);
-        motor6.setSpeed(rotate);
-        motor7.setSpeed(rotate);
-        motor8.setSpeed(rotate);
-        }
-        else{
-        motor5.setSpeed(-rotate);
-        motor6.setSpeed(-rotate);
-        motor7.setSpeed(-rotate);
-        motor8.setSpeed(-rotate);
-        }   
-    }else if (cmd_vel.linear.x>0){
-        if (cmd_vel.linear.y >0){
-        pwmLeftReq = basePWM;
-        pwmRightReq = basePWM;
-        motor1.setSpeed(basePWM);
-        motor2.setSpeed(basePWM);
-        motor3.setSpeed(basePWM);
-        motor4.setSpeed(basePWM);            
-        motor5.setSpeed(rotate);
-        motor6.setSpeed(rotate);
-        motor7.setSpeed(rotate);
-        motor8.setSpeed(rotate);
-        }
-        else{
-        pwmLeftReq = basePWM;
-        pwmRightReq = basePWM;
-        motor1.setSpeed(basePWM);
-        motor2.setSpeed(basePWM);
-        motor3.setSpeed(basePWM);
-        motor4.setSpeed(basePWM);               
-        motor5.setSpeed(-rotate);
-        motor6.setSpeed(-rotate);
-        motor7.setSpeed(-rotate);
-        motor8.setSpeed(-rotate);
-        }  
-    }else{
-        if (cmd_vel.linear.y >0){
-        pwmLeftReq = -basePWM;
-        pwmRightReq = -basePWM;
-        motor1.setSpeed(-basePWM);
-        motor2.setSpeed(-basePWM);
-        motor3.setSpeed(-basePWM);
-        motor4.setSpeed(-basePWM);            
-        motor5.setSpeed(rotate);
-        motor6.setSpeed(rotate);
-        motor7.setSpeed(rotate);
-        motor8.setSpeed(rotate);
-        }
-        else{
-        pwmLeftReq = -basePWM;
-        pwmRightReq = -basePWM;
-        motor1.setSpeed(-basePWM);
-        motor2.setSpeed(-basePWM);
-        motor3.setSpeed(-basePWM);
-        motor4.setSpeed(-basePWM);               
-        motor5.setSpeed(-rotate);
-        motor6.setSpeed(-rotate);
-        motor7.setSpeed(-rotate);
-        motor8.setSpeed(-rotate);
-        }  
-    }
 
-  }
-  if (cmdVel.angular.z != 0.0 && cmd_vel.linear.y==0) {
-    if (cmdVel.linear.x >= 0) { // Forward motion
-      // Turn left
-      if (cmdVel.angular.z > 0.0) {
+if (cmdVel.linear.y!=0) {
+  if (cmdVel.linear.x == 0) { // Forward motion
+      
+
+    if (cmdVel.linear.y > 0.0) {
+      pwmup=180;
+    motor5.setSpeed(pwmup);
+    motor6.setSpeed(pwmup);
+    motor7.setSpeed(pwmup);
+    motor8.setSpeed(pwmup);
+
+      }
+      else {
+        pwmup=-180;
+    motor5.setSpeed(-pwmup);
+    motor6.setSpeed(-pwmup);
+    motor7.setSpeed(-pwmup);
+    motor8.setSpeed(-pwmup);
+      }
+}else if (cmdVel.linear.x > 0){
+    if (cmdVel.linear.y > 0.0) {
+    pwmLeftReq = basePWM;
+    pwmRightReq = basePWM;
+    pwmup=180;
+    motor1.setSpeed(basePWM);
+    motor2.setSpeed(basePWM);
+    motor3.setSpeed(basePWM);
+    motor4.setSpeed(basePWM);
+    motor5.setSpeed(pwmup);
+      }
+      else {
+    pwmLeftReq = -basePWM;
+    pwmRightReq = -basePWM;
+    pwmup=-180;
+    motor1.setSpeed(-basePWM);
+    motor2.setSpeed(-basePWM);
+    motor3.setSpeed(-basePWM);
+    motor4.setSpeed(-basePWM);
+    motor5.setSpeed(pwmup);
+
+      }
+}else if (cmdVel.linear.x < 0){
+    if (cmdVel.linear.y > 0.0) {
+    pwmLeftReq = basePWM;
+    pwmRightReq = basePWM;
+    pwmup=180;
+    motor1.setSpeed(basePWM);
+    motor2.setSpeed(basePWM);
+    motor3.setSpeed(basePWM);
+    motor4.setSpeed(basePWM);
+    motor5.setSpeed(pwmup);
+      }
+      else {
+    pwmLeftReq = -basePWM;
+    pwmRightReq = -basePWM;
+    pwmup=-180;
+    motor1.setSpeed(-basePWM);
+    motor2.setSpeed(-basePWM);
+    motor3.setSpeed(-basePWM);
+    motor4.setSpeed(-basePWM);
+    motor5.setSpeed(pwmup);
+
+      }
+  
+}else if (cmdVel.angular.z < 0){
+    if (cmdVel.linear.y > 0.0) {
+        pwmLeftReq = basePWM1;
+        pwmRightReq = -basePWM1;
+        pwmup=180;
+    motor1.setSpeed(basePWM1);
+    motor2.setSpeed(-basePWM1);
+    motor3.setSpeed(basePWM1);
+    motor4.setSpeed(-basePWM1);
+    motor5.setSpeed(pwmup);
+      }
+      else {
         pwmLeftReq = -basePWM1;
         pwmRightReq = basePWM1;
-        motor1.setSpeed(-basePWM1);
-        motor2.setSpeed(basePWM1);
-        motor3.setSpeed(-basePWM1);
-        motor4.setSpeed(basePWM1);
+        pwmup=-180;
+    motor1.setSpeed(basePWM1);
+    motor2.setSpeed(-basePWM1);
+    motor3.setSpeed(basePWM1);
+    motor4.setSpeed(-basePWM1);
+    motor5.setSpeed(pwmup);
+
+      }
+   
+}else if (cmdVel.angular.z > 0){
+    if (cmdVel.linear.y > 0.0) {
+        pwmLeftReq = -basePWM1;
+        pwmRightReq = basePWM1;
+        pwmup=180;
+    motor1.setSpeed(-basePWM1);
+    motor2.setSpeed(basePWM1);
+    motor3.setSpeed(-basePWM1);
+    motor4.setSpeed(basePWM1);
+    motor5.setSpeed(pwmup);
+      }
+      else {
+        pwmLeftReq = -basePWM1;
+        pwmRightReq = basePWM1;
+        pwmup=-180;
+    motor1.setSpeed(-basePWM1);
+    motor2.setSpeed(basePWM1);
+    motor3.setSpeed(-basePWM1);
+    motor4.setSpeed(basePWM1);
+    motor5.setSpeed(pwmup);
+
+      }
+  }   
+}
+
+if (cmdVel.angular.z != 0.0) {
+  if (cmdVel.linear.x >= 0) { // Forward motion
+    
+
+    if (cmdVel.angular.z > 0.0) {
+        pwmLeftReq = -basePWM1;
+        pwmRightReq = basePWM1;
+    motor1.setSpeed(-basePWM1);
+    motor2.setSpeed(basePWM1);
+    motor3.setSpeed(-basePWM1);
+    motor4.setSpeed(basePWM1);
 
       }
       else {
         pwmLeftReq = basePWM1;
         pwmRightReq = -basePWM1;
-        motor1.setSpeed(basePWM1);
-        motor2.setSpeed(-basePWM1);
-        motor3.setSpeed(basePWM1);
-        motor4.setSpeed(-basePWM1);
+    motor1.setSpeed(basePWM1);
+    motor2.setSpeed(-basePWM1);
+    motor3.setSpeed(basePWM1);
+    motor4.setSpeed(-basePWM1);
       }
-   }else{
-      if (cmdVel.angular.z > 0.0) {
+  }else{
+    if (cmdVel.angular.z > 0.0) {
         pwmLeftReq = -basePWM1;
         pwmRightReq = basePWM1;
-        motor1.setSpeed(-basePWM1);
-        motor2.setSpeed(basePWM1);
-        motor3.setSpeed(-basePWM1);
-        motor4.setSpeed(basePWM1);
+    motor1.setSpeed(-basePWM1);
+    motor2.setSpeed(basePWM1);
+    motor3.setSpeed(-basePWM1);
+    motor4.setSpeed(basePWM1);
 
       }
       else{
-        pwmLeftReq = basePWM1;
+      pwmLeftReq = basePWM1;
         pwmRightReq = -basePWM1;
-        motor1.setSpeed(basePWM1);
-        motor2.setSpeed(-basePWM1);
-        motor3.setSpeed(basePWM1);
-        motor4.setSpeed(-basePWM1);
-      }
-    }
-  }
-  // Go straight
-    
-    static double prevDiff = 0;
-    static double prevPrevDiff = 0;
-    double currDifference = velLeftWheel - velRightWheel;
-    double avgDifference = (prevDiff+prevPrevDiff+currDifference)/3;
-    prevPrevDiff = prevDiff;
-    prevDiff = currDifference;
-    
-    if (cmdVel.angular.z == 0) {
-        if (cmdVel.linear.x >= 0) { // Moving forward
-            pwmLeftReq += (int)(avgDifference * DRIFT_MULTIPLIER);
-            pwmRightReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
-            motor1.setSpeed(pwmLeftReq);
-            motor2.setSpeed(pwmRightReq);
-            motor3.setSpeed(pwmLeftReq);
-            motor4.setSpeed(pwmRightReq);
-        } else { // Moving backward
-            pwmLeftReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
-            pwmRightReq += (int)(avgDifference * DRIFT_MULTIPLIER);
-            motor1.setSpeed(pwmLeftReq);
-            motor2.setSpeed(pwmRightReq);
-            motor3.setSpeed(pwmLeftReq);
-            motor4.setSpeed(pwmRightReq);
-        }
-    } else {
-        if (cmdVel.angular.z > 0) { // Turning right
-            pwmLeftReq += (int)(avgDifference * DRIFT_MULTIPLIER);
-            pwmRightReq += (int)(avgDifference * DRIFT_MULTIPLIER);
-            motor1.setSpeed(pwmLeftReq);
-            motor2.setSpeed(pwmRightReq);
-            motor3.setSpeed(pwmLeftReq);
-            motor4.setSpeed(pwmRightReq);
+    motor1.setSpeed(basePWM1);
+    motor2.setSpeed(-basePWM1);
+    motor3.setSpeed(basePWM1);
+    motor4.setSpeed(-basePWM1);
 
-        } else { // Turning left
-            pwmLeftReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
-            pwmRightReq -= (int)(avgDifference * DRIFT_MULTIPLIER);
-            motor1.setSpeed(pwmLeftReq);
-            motor2.setSpeed(pwmRightReq);
-            motor3.setSpeed(pwmLeftReq);
-            motor4.setSpeed(pwmRightReq);
-        }
-    }
+  // Check if we need to turn
+     }
+  }
+}  
 
     // Correct PWM values of both wheels to make the vehicle go straight
     // Additional corrections...
@@ -446,14 +468,27 @@ void set_pwm_values() {
     digitalWrite(dir3, HIGH);  
     digitalWrite(dir4, HIGH);
 
+     if (pwmup>0)
+      digitalWrite(dir5, HIGH);
+    else if (pwmup<0)
+      digitalWrite(dir5, LOW);
 
- 
-  }
+
+  
+
+  }  
   else if (pwmLeftReq < 0 && pwmRightReq < 0) {
     digitalWrite(dir1, LOW);
     digitalWrite(dir2, LOW);
     digitalWrite(dir3, LOW);
     digitalWrite(dir4, LOW);
+
+     if (pwmup>0)
+      digitalWrite(dir5, HIGH);
+    else if (pwmup<0)
+      digitalWrite(dir5, LOW);
+    else
+    motor5.setSpeed(0);
 
 
   }
@@ -463,13 +498,22 @@ void set_pwm_values() {
     digitalWrite(dir3, LOW);
     digitalWrite(dir4, HIGH);
 
- 
+     if (pwmup>0)
+      digitalWrite(dir5, HIGH);
+    else if (pwmup<0)
+      digitalWrite(dir5, LOW);
+
   }
   else if (pwmLeftReq > 0 && pwmRightReq < 0) {
     digitalWrite(dir1, HIGH);
     digitalWrite(dir2, LOW);
     digitalWrite(dir3, HIGH);
     digitalWrite(dir4, LOW);
+
+     if (pwmup>0)
+      digitalWrite(dir5, HIGH);
+    else if (pwmup<0)
+      digitalWrite(dir5, LOW);
 
  
   }
@@ -479,6 +523,7 @@ void set_pwm_values() {
     motor2.setSpeed(0);
     motor2.setSpeed(0);
     motor4.setSpeed(0);
+    motor5.setSpeed(0);
 
 
   }
@@ -556,7 +601,8 @@ void setup() {
   pinMode(dir3, OUTPUT);
   pinMode(pwm4, OUTPUT);
   pinMode(dir4, OUTPUT);
-
+  pinMode(pwm5, OUTPUT);
+  pinMode(dir5, OUTPUT);
 
  
   // Turn off motors - Initial state
@@ -564,12 +610,14 @@ void setup() {
   digitalWrite(pwm2, LOW);
   digitalWrite(pwm3, LOW);
   digitalWrite(pwm4, LOW);
+  digitalWrite(pwm5, LOW);
  
   // Set the motor speed
   analogWrite(pwm1, 0);
   analogWrite(pwm2, 0);
   analogWrite(pwm3, 0);
   analogWrite(pwm4, 0);
+  analogWrite(pwm5, 0);
 
  
   // ROS Setup
