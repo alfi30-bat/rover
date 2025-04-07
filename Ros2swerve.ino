@@ -92,7 +92,6 @@ double fl_speed, fr_speed, rl_speed, rr_speed;
 double fl_angle, fr_angle, rl_angle, rr_angle;
 
 
-
 // --- Motor Control Functions ---
 void setDriveMotor(CytronMD& motor, int pwm_pin, int dir_pin, double speed) {
     basePWM = K_P * fabs(speed) + b;
@@ -149,10 +148,8 @@ void setSteerMotor(int pwm_pin, int dir_pin, double target_angle) {
         pwm_value = constrain(pwm_value, 0, MAX_PWM);
 
         // Apply PWM to the motor
-        if (vx!=0)
         analogWrite(pwm_pin, pwm_value);
-        else
-        analogWrite(pwm_pin, 0);
+
 
         // Determine the direction of the motor
         if (error > 0) {
@@ -174,21 +171,22 @@ void setSteerMotor(int pwm_pin, int dir_pin, double target_angle) {
 
 // --- Swerve Kinematics ---
 void calculateSwerve(double vx, double vy, double omega) {
-    double A = vx - omega * (WHEEL_BASE / 2);
-    double B = vx + omega * (WHEEL_BASE / 2);
-
+    double A = vx - omega * (TRACK_WIDTH / 2);
+    double B = vx + omega * (TRACK_WIDTH / 2);
+    double C = vy - omega * (WHEEL_BASE / 2);
+    double D = vy + omega * (WHEEL_BASE / 2);
 
     // Compute wheel speeds
-    fl_speed = sqrt(A * A + vy * vy);
-    fr_speed = sqrt(B * B +  vy * vy);
-    rl_speed = sqrt(A * A + vy * vy);
-    rr_speed = sqrt(B * B + vy * vy);
+    fl_speed = sqrt(B * B + D * D);
+    fr_speed = sqrt(B * B + C * C);
+    rl_speed = sqrt(A * A + D * D);
+    rr_speed = sqrt(A * A + C * C);
 
     // Compute wheel angles (steering)
-    fl_angle = atan2(vy, A);
-    fr_angle = atan2(vy, B);
-    rl_angle = atan2(vy, A);
-    rr_angle = atan2(vy, B);
+    fl_angle = atan2(D, B);
+    fr_angle = atan2(C, B);
+    rl_angle = atan2(D, A);
+    rr_angle = atan2(C, A);
 
     // Normalize speed if needed
     double max_speed = max(max(fl_speed, fr_speed), max(rl_speed, rr_speed));
@@ -199,6 +197,7 @@ void calculateSwerve(double vx, double vy, double omega) {
         rr_speed = (rr_speed / max_speed) * MAX_PWM;
     }
 }
+
 
 // --- ROS Callback ---
 geometry_msgs__msg__Twist cmd_vel_msg;
@@ -254,15 +253,34 @@ void computeOdometry() {
   float v_RR = ticks_right_rear * 2 * PI * WHEEL_RADIUS / TICKS_PER_REV;
   
   // Robot's velocities in robot frame (holonomic robot)
-  // Assuming wheel velocities are arranged to affect x and y linear velocities and rotational velocity
-  float v_x = (v_LF + v_RF + v_LR + v_RR) / 4.0;  // Average of all wheels for translational velocity
-  float v_y = 0; // Can be adjusted for holonomic systems with appropriate wheel placement
-  float omega = (v_RR - v_LF + v_RF - v_LR) / WHEEL_BASE; // A simple approach for rotational velocity
-  
+    // Wheel angles (assuming 45-degree swerve modules)
+    float alpha_FL = fl_angle;
+    float alpha_FR = fr_angle;
+    float alpha_RL = rl_angle;
+    float alpha_RR = rr_angle;
+
+    // Compute velocities in the robot frame
+    float v_x = (v_LF * cos(alpha_FL) + v_RF * cos(alpha_FR) + v_LR * cos(alpha_RL) + v_RR * cos(alpha_RR)) / 4.0;
+    float v_y = (v_LF * sin(alpha_FL) + v_RF * sin(alpha_FR) + v_LR * sin(alpha_RL) + v_RR * sin(alpha_RR)) / 4.0;
+    float odom_omega = ((v_RF - v_LF) + (v_RR - v_LR)) / (2 * WHEEL_BASE); // Rotational velocity based on wheel movement differences
+
+    // Calculate the error between commanded velocities and computed velocities
+    float error_v_x = abs(vx - v_x);
+    float error_v_y = abs(vy - v_y);
+    float error_omega = abs(omega - odom_omega);
+
+    // Log errors
+    Serial.print("Error in linear velocity X: ");
+    Serial.println(error_v_x);
+    Serial.print("Error in linear velocity Y: ");
+    Serial.println(error_v_y);
+    Serial.print("Error in angular velocity: ");
+    Serial.println(error_omega);
+    delay(100);
   // Update position and orientation using kinematics
   x += v_x * cos(theta) * dt;
   y += v_x * sin(theta) * dt;
-  theta += omega * dt;
+  theta += odom_omega * dt;
   
   // Prepare the odometry message
   odom_msg.header.stamp.sec = current_time / 1000;
@@ -274,7 +292,7 @@ void computeOdometry() {
   
   // Publish the odometry message
   (void)rcl_publish(&odom_pub, &odom_msg, NULL);
-  
+
   // Reset ticks for the next loop
   ticks_left_front = 0;
   ticks_right_front = 0;
@@ -326,6 +344,7 @@ void setup() {
 
     rclc_subscription_init_default(&cmd_vel_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "/cmd_vel");
     rclc_publisher_init_default(&odom_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "/odom");
+
 
     rclc_executor_init(&executor, &support.context, 2, &allocator);
     rclc_executor_add_subscription(&executor, &cmd_vel_sub, &cmd_vel_msg, cmd_vel_callback, ON_NEW_DATA);
