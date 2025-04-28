@@ -186,19 +186,26 @@ void setSteerMotor(int pwm_pin, int dir_pin, double target_angle, int steer_tick
     }
 }
 
+
 double calculateCurrentAngle(int steer_ticks) {
     // Convert steer ticks to angle in degrees (assuming -90° to 90° range)
     return (steer_ticks / (double)STEER_TICKS_PER_REV) * 360.0 - 180.0;
 }
 
-
+double normalizeAngle(double angle) {
+    // Normalize the angle to the range [-90, 90]
+    while (angle > 90) angle -= 180;
+    while (angle < -90) angle += 180;
+    return angle;
+}
 
 // --- Swerve Kinematics ---
 void calculateSwerve(double vx, double vy, double omega) {
-    double A = vx - omega * (WHEEL_BASE / 2);
-    double B = vx + omega * (WHEEL_BASE / 2);
-    double C = vy - omega * (TRACK_WIDTH / 2);
-    double D = vy + omega * (TRACK_WIDTH / 2);
+    // Calculate wheel speeds and angles based on the input velocity and omega values.
+    double A = vx - omega * (TRACK_WIDTH / 2);
+    double B = vx + omega * (TRACK_WIDTH / 2);
+    double C = vy - omega * (WHEEL_BASE / 2);
+    double D = vy + omega * (WHEEL_BASE / 2);
 
     // Compute wheel speeds
     fl_speed = sqrt(B * B + D * D);
@@ -207,10 +214,10 @@ void calculateSwerve(double vx, double vy, double omega) {
     rr_speed = sqrt(A * A + C * C);
 
     // Compute wheel angles (steering)
-    fl_angle = atan2(B, D)*180/PI;
-    fr_angle = atan2(B, C)*180/PI;
-    rl_angle = atan2(A, D)*180/PI;
-    rr_angle = atan2(A, C)*180/PI;
+    fl_angle = atan2(D, B);
+    fr_angle = atan2(C, B);
+    rl_angle = atan2(D, A);
+    rr_angle = atan2(C, A);
 
     // Normalize speed if needed
     double max_speed = max(max(fl_speed, fr_speed), max(rl_speed, rr_speed));
@@ -247,10 +254,13 @@ void cmd_vel_callback(const void *msg_in) {
     setDriveMotor(motor4, RR_DRIVE_PWM, RR_DRIVE_DIR, rr_speed);
 
     // Set Steering Motors (wheel angles)
-setSteerMotor(FL_STEER_PWM, FL_STEER_DIR, fl_angle, steer_ticks[0]);
-setSteerMotor(FR_STEER_PWM, FR_STEER_DIR, fr_angle, steer_ticks[1]);
-setSteerMotor(RL_STEER_PWM, RL_STEER_DIR, rl_angle, steer_ticks[2]);
-setSteerMotor(RR_STEER_PWM, RR_STEER_DIR, rr_angle, steer_ticks[3]);
+setSteerMotor(FL_STEER_PWM, FL_STEER_DIR, normalizeAngle(fl_angle), steer_ticks[0]);
+
+setSteerMotor(FR_STEER_PWM, FR_STEER_DIR, normalizeAngle(fr_angle), steer_ticks[1]);
+
+setSteerMotor(RL_STEER_PWM, RL_STEER_DIR, normalizeAngle(rl_angle), steer_ticks[2]);
+
+setSteerMotor(RR_STEER_PWM, RR_STEER_DIR, normalizeAngle(rr_angle), steer_ticks[3]);
 
 
     // Stop drive motors when joystick is neutral
@@ -341,7 +351,16 @@ void computeOdometry() {
     odom_msg.twist.twist.linear.x = v_x;
     odom_msg.twist.twist.linear.y = v_y;
     odom_msg.twist.twist.angular.z = omega;
+    // Set the static frame IDs
+    odom_msg.header.frame_id.data = (char*)malloc(10 * sizeof(char));
+    strcpy(odom_msg.header.frame_id.data, "world"); // Parent frame
+    odom_msg.header.frame_id.size = strlen(odom_msg.header.frame_id.data);
+    odom_msg.header.frame_id.capacity = 10;
 
+    odom_msg.child_frame_id.data = (char*)malloc(10 * sizeof(char));
+    strcpy(odom_msg.child_frame_id.data, "base_link"); // Child frame
+    odom_msg.child_frame_id.size = strlen(odom_msg.child_frame_id.data);
+    odom_msg.child_frame_id.capacity = 10;
     rcl_publish(&odom_pub, &odom_msg, NULL);
 
     last_time = current_time;  
