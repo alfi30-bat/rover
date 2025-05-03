@@ -1,0 +1,503 @@
+#include <ros.h>
+#include <std_msgs/Int16.h>
+#include <geometry_msgs/Twist.h>
+#include "CytronMotorDriver.h"
+
+
+// Handles startup and shutdown of ROS
+ros::NodeHandle nh;
+
+////////////////// Tick Data Publishing Variables and Constants ///////////////
+// Motor and wheel configuration
+#define TICKS_PER_REV 2048
+#define MAX_PWM 255
+#define WHEEL_RADIUS 123
+#define TRACK_WIDTH 732.28
+#define WHEEL_BASE 820
+#define PI 3.14159265
+#define STEER_TICKS_PER_REV 80172           // quadrature counts per full rev (360°)
+#define FULL_ANGLE 360.0f
+#define HALF_ANGLE 180.0f
+#define SPEED_PWM  153             // ~60% duty
+#define TIMEOUT_MS 5000            // 5 s timeout
+
+// Encoder pin definitions for drive and steering wheels (replace as per setup)
+#define FL_DRIVE_ENC_A 0
+#define FL_DRIVE_ENC_B 1
+#define FR_DRIVE_ENC_A 15
+#define FR_DRIVE_ENC_B 14
+#define RL_DRIVE_ENC_A 21
+#define RL_DRIVE_ENC_B 20
+#define RR_DRIVE_ENC_A 28
+#define RR_DRIVE_ENC_B 29
+
+#define FL_STEER_ENC_A 7
+#define FL_STEER_ENC_B 8
+#define FR_STEER_ENC_A 16
+#define FR_STEER_ENC_B 17
+#define RL_STEER_ENC_A 25
+#define RL_STEER_ENC_B 24
+#define RR_STEER_ENC_A 34
+#define RR_STEER_ENC_B 35
+
+
+// --- Motor Driver Pins ---
+#define FL_DRIVE_PWM 3
+#define FL_DRIVE_DIR 4
+#define FR_DRIVE_PWM 5
+#define FR_DRIVE_DIR 6
+#define RL_DRIVE_PWM 9
+#define RL_DRIVE_DIR 10
+#define RR_DRIVE_PWM 11
+#define RR_DRIVE_DIR 12
+
+ #include "CytronMotorDriver.h"
+// Array to store encoder tick counts for drive wheels
+int32_t drive_ticks[4] = {0}; // FL, FR, RL, RR
+
+// Array to store encoder tick counts for steering wheels
+int32_t steer_ticks[4] = {0}; // FL, FR, RL, RR
+
+// Configure the motor driver.
+CytronMD motor1(PWM_DIR, 3, 4);  // PWM 1 = Pin 3, DIR 1 = Pin 4.
+CytronMD motor2(PWM_DIR, 5, 6); 
+CytronMD motor3(PWM_DIR, RL_DRIVE_PWM, RL_DRIVE_DIR);  // PWM 1 = Pin 3, DIR 1 = Pin 4.
+CytronMD motor4(PWM_DIR, RR_DRIVE_PWM, RR_DRIVE_DIR); 
+
+#define FL_STEER_PWM 18
+#define FL_STEER_DIR 19
+#define FR_STEER_PWM 36
+#define FR_STEER_DIR 37
+#define RL_STEER_PWM 22
+#define RL_STEER_DIR 23
+#define RR_STEER_PWM 2
+#define RR_STEER_DIR 33
+
+// True = Forward; False = Reverse
+boolean Direction_left = true;
+boolean Direction_right = true;
+
+// Minumum and maximum values for 16-bit integers
+// Range of 65,535
+const int encoder_minimum = -32768;
+const int encoder_maximum = 32767;
+
+// Keep track of the number of wheel ticks
+std_msgs::Int16 right_wheel_tick_count;
+ros::Publisher rightPub("right_ticks", &right_wheel_tick_count);
+
+
+// Time interval for measurements in milliseconds
+const int interval = 30;
+long previousMillis = 0;
+long currentMillis = 0;
+
+////////////////// Motor Controller Variables and Constants ///////////////////
+
+// Motor A connections Left Motor
+const int pwm1 = 6;
+const int dir1 = 7;
+CytronMD motor1(PWM_DIR, 6, 7);  // PWM 1 = Pin 3, DIR 1 = Pin 4
+
+// Motor B connections Right Motor
+const int pwm2 = 24;
+const int dir2 = 25;
+CytronMD motor2(PWM_DIR, 24, 25);
+
+// Motor C connections
+const int pwm3 = 26;
+const int dir3 = 27;
+CytronMD motor3(PWM_DIR, 26, 27);
+
+// Motor D connections
+const int pwm4 = 30;
+const int dir4 = 31;
+CytronMD motor4(PWM_DIR, 30, 31);
+
+// How much the PWM value can change each cycle
+const int PWM_INCREMENT = 1;
+
+// Number of ticks per wheel revolution. We won't use this in this code.
+const int TICKS_PER_REVOLUTION = 668;
+
+// Wheel radius in meters
+const double WHEEL_RADIUS = 0.265;
+
+// Distance from center of the left tire to the center of the right tire in m
+const double WHEEL_BASE = 0.30;
+
+// Number of ticks a wheel makes moving a linear distance of 1 meter
+// This value was measured manually.
+// Turning PWM output (0 = min, 255 = max for PWM values)
+//const int PWM_TURN = 225;
+
+// Set maximum and minimum limits for the PWM values
+const int PWM_MIN = 100; // about 0.1 m/s
+const int PWM_MAX = 255; // about 0.172 m/s
+//const int PWM_BACKWARD = 225;
+
+// Set linear velocity and PWM variable values for each wheel
+double velLeftWheel = 0;
+double velRightWheel = 0;
+double pwmLeftReq = 0;
+double pwmRightReq = 0;
+
+// Record the time that the last velocity command was received
+double lastCmdVelReceived = 0;
+int ticks_left_front = 0, ticks_right_front = 0, ticks_left_rear = 0, ticks_right_rear = 0;
+
+void setDriveMotor(int pwm_pin, int dir_pin, double speed) {
+    if (speed >= 0) {
+        digitalWrite(dir_pin, HIGH);
+        analogWrite(pwm_pin, 180);
+    } else if(speed<0) {
+        digitalWrite(dir_pin, LOW);
+        speed = -speed;
+        analogWrite(pwm_pin, -180);
+    }else{
+      analogWrite(pwm_pin, 0);
+    }
+    speed = constrain(speed, 0, MAX_PWM);
+    //analogWrite(pwm_pin, speed);
+}
+
+
+
+void moveBy(int32_t delta, int pwm_pin, int dir_pin, int msteer_ticks) {
+  if (delta == 0) { Serial.println(F("↔ No movement needed.")); return; }
+
+  // capture target
+  noInterrupts(); int32_t target = msteer_ticks + delta; interrupts();
+
+  // set direction
+  bool forward = (delta > 0);
+  digitalWrite(dir_pin, forward ? HIGH : LOW);
+  analogWrite(pwm_pin, SPEED_PWM);
+
+  unsigned long t0 = millis(), lastRpt = t0;
+  while (true) {
+    noInterrupts(); int32_t now = msteer_ticks; interrupts();
+    // arrived?
+    if ((forward && now >= target) || (!forward && now <= target)) break;
+    // timeout?
+    if (millis() - t0 > TIMEOUT_MS) { Serial.println(F("⏱ Timeout—stopping.")); break; }
+    // debug
+    if (millis() - lastRpt > 200) {
+      Serial.print(F("   msteer_ticks=")); Serial.println(now);
+      lastRpt = millis();
+    }
+  }
+  // stop
+  analogWrite(pwm_pin, 0);
+  delay(50);
+}
+
+
+void setSteerMotor(int pwm_pin, int dir_pin, double target_angle, int steer_ticks) {
+  // read current position in ticks
+  noInterrupts(); int32_t startTicks = steer_ticks; interrupts();
+  float currentAngle = (startTicks / (float)STEER_TICKS_PER_REV) * FULL_ANGLE;
+  // wrap currentAngle into [-180, +180]
+  if (currentAngle > HALF_ANGLE) currentAngle -= FULL_ANGLE;
+  else if (currentAngle < -HALF_ANGLE) currentAngle += FULL_ANGLE;
+
+  Serial.print(F("↳ Currently at ")); Serial.print(currentAngle, 2); Serial.println(F("°"));
+
+  // compute shortest-path delta in [-180, +180]
+  float deltaAngle = target_angle - currentAngle;
+  if (deltaAngle > HALF_ANGLE)      deltaAngle -= FULL_ANGLE;
+  else if (deltaAngle < -HALF_ANGLE) deltaAngle += FULL_ANGLE;
+
+  // compute delta ticks (32-bit)
+  int32_t deltaTicks = (int32_t)lroundf(deltaAngle * STEER_TICKS_PER_REV / FULL_ANGLE);
+  Serial.print(F("→ Moving by ")); Serial.print(deltaAngle, 2);
+  Serial.print(F("° → ")); Serial.print(deltaTicks); Serial.println(F(" ticks"));
+
+  // perform move
+  moveBy(deltaTicks, pwm_pin, dir_pin, steer_ticks);
+
+  // report final
+  noInterrupts(); int32_t endTicks = steer_ticks; interrupts();
+  float endAngle = (endTicks / (float)STEER_TICKS_PER_REV) * FULL_ANGLE;
+  if (endAngle > HALF_ANGLE) endAngle -= FULL_ANGLE;
+  else if (endAngle < -HALF_ANGLE) endAngle += FULL_ANGLE;
+  Serial.print(F("✅ Reached ")); Serial.print(endAngle, 2); Serial.println(F("°. Ready."));
+
+}
+
+float mapRange(float value, float in_min, float in_max, float out_min, float out_max) {
+    return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+
+/////////////////////// Tick Data Publishing Functions ////////////////////////
+
+void right_wheel_tick() {
+    // Read the value for the encoder for the right wheels and combine them
+    int val1 = digitalRead(ENC_IN_RIGHT1_B);
+    int val2 = digitalRead(ENC_IN_RIGHT2_B);
+    int combined_val = (val1 + val2) / 2;
+    
+    if (combined_val == LOW) {
+        Direction_right = false; // Reverse
+    } else {
+        Direction_right = true; // Forward
+    }
+   
+    if (Direction_right) {
+        if (right_wheel_tick_count.data == encoder_maximum) {
+            right_wheel_tick_count.data = encoder_minimum;
+        } else {
+            right_wheel_tick_count.data++;  
+        }    
+    } else {
+        if (right_wheel_tick_count.data == encoder_minimum) {
+            right_wheel_tick_count.data = encoder_maximum;
+        } else {
+            right_wheel_tick_count.data--;  
+        }  
+    }
+}
+
+// Increment the number of ticks for all wheels
+/////////////////////// Motor Controller Functions ////////////////////////////
+
+// tick count message is rpublished on the /left_ticks topic.
+void calc_vel_left_wheel(){
+   
+  // Previous timestamp
+  static double prevTime = 0;
+   
+  // Variable gets created and initialized the first time a function is called.
+  static int prevLeftCount = 0;
+ 
+  // Manage rollover and rollunder when we get outside the 16-bit integer range
+  int numOfTicks = (65535 + left_wheel_tick_count.data - prevLeftCount) % 65535;
+ 
+  // If we have had a big jump, it means the tick count has rolled over.
+  if (numOfTicks > 10000) {
+        numOfTicks = 0 - (65535 - numOfTicks);
+  }
+ 
+  // Calculate wheel velocity in meters per second
+  velLeftWheel = numOfTicks/TICKS_PER_METER/((millis()/1000)-prevTime);
+ 
+  // Keep track of the previous tick count
+  prevLeftCount = left_wheel_tick_count.data;
+ 
+  // Update the timestamp
+  prevTime = (millis()/1000);
+ 
+}
+ 
+// Calculate the right wheel linear velocity in m/s every time a
+// tick count message is published on the /right_ticks topic.
+
+// Take the velocity command as input and calculate the PWM values.
+void calc_pwm_values(const geometry_msgs::Twist& cmdVel) {
+   
+  // Record timestamp of last velocity command received
+  lastCmdVelReceived = (millis()/1000);
+   
+  // Calculate the PWM value given the desired velocity
+  double basePWM = K_P * fabs(cmdVel.linear.x) + b;
+     vy = cmd->linear.y;   // Joystick sideways strafing
+     vx = cmd->linear.x;   // Joystick forward/backward
+  //double basePWM1 = K_P * fabs(cmdVel.angular.z) + b;
+  double basePWM1 = 160;
+     omega = cmdVel.angular.z; // Joystick rotation
+    basepwm = K_P *vx +b;
+
+float anglee = mapRange(omega, -1.0, 1.0, -180.0, 180.0);
+
+// output will now be -90.0
+
+
+    if(basepwm<0){
+  digitalWrite(ledPin, HIGH);   // set the LED on
+    }else{
+  digitalWrite(ledPin, LOW);   // set the LED on
+    }
+    if(vx>0 && vy>0 || vx>0 && vy<0){
+    // Set Drive Motors (wheel speeds)
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, basepwm);
+    steer_control(anglee);
+    }else if(vx<0 && vy<0 || vx<0 && vy>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    steer_control(anglee);      
+    }else if(vx>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, basepwm);
+    }else if(vx<0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    }else if(vy>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    steer_control(anglee);      
+    }else if(vy<0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, basepwm);
+    steer_control(anglee);      
+    }else if(omega>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    steer_control(anglee);      
+    }else{
+        analogWrite(FL_DRIVE_PWM, 0);
+        analogWrite(FR_DRIVE_PWM, 0);
+        analogWrite(RL_DRIVE_PWM, 0);
+        analogWrite(RR_DRIVE_PWM, 0);
+        analogWrite(FL_STEER_PWM, 0);
+        analogWrite(FR_STEER_PWM, 0);
+        analogWrite(RL_STEER_PWM, 0);
+        analogWrite(RR_STEER_PWM, 0);        
+    }
+
+
+}
+void steer_control(int anggle){
+      // Set Steering Motors (wheel angles)
+    setSteerMotor(FL_STEER_PWM, FL_STEER_DIR, anggle, steer_ticks[0]);
+
+    setSteerMotor(FR_STEER_PWM, FR_STEER_DIR, anggle, steer_ticks[1]);
+
+    setSteerMotor(RL_STEER_PWM, RL_STEER_DIR, anggle, steer_ticks[2]);
+
+    setSteerMotor(RR_STEER_PWM, RR_STEER_DIR, anggle, steer_ticks[3]);
+
+}
+ 
+// Last known states for quadrature decoding (for drive wheels)
+int last_drive_val[4] = {HIGH, HIGH, HIGH, HIGH};
+
+// Last known states for quadrature decoding (for steer wheels)
+int last_steer_val[4] = {HIGH, HIGH, HIGH, HIGH};
+
+// Interrupt service routines for drive and steer wheels
+void encoderDriveFL() { update_wheel_tick(0, FL_DRIVE_ENC_A, FL_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+void encoderDriveFR() { update_wheel_tick(1, FR_DRIVE_ENC_A, FR_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+void encoderDriveRL() { update_wheel_tick(2, RL_DRIVE_ENC_A, RL_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+void encoderDriveRR() { update_wheel_tick(3, RR_DRIVE_ENC_A, RR_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+
+void encoderSteerFL() { update_wheel_tick(0, FL_STEER_ENC_A, FL_STEER_ENC_B, steer_ticks, last_steer_val); }
+void encoderSteerFR() { update_wheel_tick(1, FR_STEER_ENC_A, FR_STEER_ENC_B, steer_ticks, last_steer_val); }
+void encoderSteerRL() { update_wheel_tick(2, RL_STEER_ENC_A, RL_STEER_ENC_B, steer_ticks, last_steer_val); }
+void encoderSteerRR() { update_wheel_tick(3, RR_STEER_ENC_A, RR_STEER_ENC_B, steer_ticks, last_steer_val); }
+
+// Set up ROS subscriber to the velocity command
+ros::Subscriber<geometry_msgs::Twist> subCmdVel("cmd_vel", &calc_pwm_values );
+ 
+void setup() {
+ 
+
+    pinMode(FL_DRIVE_DIR, OUTPUT);
+    pinMode(FR_DRIVE_DIR, OUTPUT);
+    pinMode(RL_DRIVE_DIR, OUTPUT);
+    pinMode(RR_DRIVE_DIR, OUTPUT);
+
+    pinMode(FL_STEER_DIR, OUTPUT);
+    pinMode(FR_STEER_DIR, OUTPUT);
+    pinMode(RL_STEER_DIR, OUTPUT);
+    pinMode(RR_STEER_DIR, OUTPUT);
+
+
+    // Drive Encoder Pin Setup
+    pinMode(FL_DRIVE_ENC_A, INPUT);
+    pinMode(FL_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FL_DRIVE_ENC_A), encoderDriveFL, CHANGE);
+
+    pinMode(FR_DRIVE_ENC_A, INPUT);
+    pinMode(FR_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FR_DRIVE_ENC_A), encoderDriveFR, CHANGE);
+
+    pinMode(RL_DRIVE_ENC_A, INPUT);
+    pinMode(RL_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RL_DRIVE_ENC_A), encoderDriveRL, CHANGE);
+
+    pinMode(RR_DRIVE_ENC_A, INPUT);
+    pinMode(RR_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RR_DRIVE_ENC_A), encoderDriveRR, CHANGE);
+
+    // Steer Encoder Pin Setup
+    pinMode(FL_STEER_ENC_A, INPUT);
+    pinMode(FL_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FL_STEER_ENC_A), encoderSteerFL, CHANGE);
+
+    pinMode(FR_STEER_ENC_A, INPUT);
+    pinMode(FR_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FR_STEER_ENC_A), encoderSteerFR, CHANGE);
+
+    pinMode(RL_STEER_ENC_A, INPUT);
+    pinMode(RL_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RL_STEER_ENC_A), encoderSteerRL, CHANGE);
+
+    pinMode(RR_STEER_ENC_A, INPUT);
+    pinMode(RR_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RR_STEER_ENC_A), encoderSteerRR, CHANGE);
+
+
+
+ 
+  // Turn off motors - Initial state
+  digitalWrite(pwm1, LOW);
+  digitalWrite(pwm2, LOW);
+  digitalWrite(pwm3, LOW);
+  digitalWrite(pwm4, LOW);
+ 
+  // Set the motor speed
+  analogWrite(pwm1, 0);
+  analogWrite(pwm2, 0);
+  analogWrite(pwm3, 0);
+  analogWrite(pwm4, 0);
+
+ 
+  // ROS Setup
+  nh.getHardware()->setBaud(115200);
+  nh.initNode();
+  nh.advertise(rightPub);
+  nh.subscribe(subCmdVel);
+}
+ 
+void loop() {
+   
+  nh.spinOnce();
+   
+  // Record the time
+  currentMillis = millis();
+ 
+  // If the time interval has passed, publish the number of ticks,
+  // and calculate the velocities.
+  if (currentMillis - previousMillis > interval) {
+     
+    previousMillis = currentMillis;
+ 
+    // Publish tick counts to topics
+    rightPub.publish( &right_wheel_tick_count );
+ 
+     
+  }
+   
+  // Stop the car if there are no cmd_vel messages
+  if((millis()/1000) - lastCmdVelReceived > 1) {
+    pwmLeftReq = 0;
+    pwmRightReq = 0;
+  }
+ 
+}
