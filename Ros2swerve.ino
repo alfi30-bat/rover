@@ -9,6 +9,39 @@
 #include <cstdio>
 #include <cstdlib>
 #include <math.h>
+#include <std_msgs/msg/int32_multi_array.h>
+
+struct Motor {
+    int pwm_pin;
+    int dir_pin;
+    volatile int32_t* ticks;   // Pointer to the encoder tick count
+    int32_t startTicks;
+    int32_t targetTicks;
+    bool moving;
+};
+float lastCommandedAngle = 9999.0; // Start with an impossible value.
+
+
+// Variables for odometry
+float x = 0.0;      // Current x position
+float y = 0.0;      // Current y position
+float theta = 0.0;  // Current orientation
+
+unsigned long last_time = 0;  // Previous time for calculation
+
+// Array to store encoder tick counts for drive wheels
+int32_t drive_ticks[4] = {0}; // FL, FR, RL, RR
+
+// Array to store encoder tick counts for steering wheels
+ int32_t steer_ticks[4] = {0}; // FL, FR, RL, RR
+
+// MicroROS Publishers
+rcl_publisher_t tick_publisher;
+rcl_publisher_t odom_publisher;
+
+// ROS Messages
+std_msgs__msg__Int32MultiArray tick_msg;
+nav_msgs__msg__Odometry odom_msg;
 
 // Motor and wheel configuration
 #define TICKS_PER_REV 2048
@@ -17,24 +50,31 @@
 #define TRACK_WIDTH 732.28
 #define WHEEL_BASE 820
 #define PI 3.14159265
+#define STEER_TICKS_PER_REV 65172           // quadrature counts per full rev (360°)
+#define FULL_ANGLE 360.0f
+#define HALF_ANGLE 180.0f
+#define SPEED_PWM  153             // ~60% duty
+         // 5 s timeout
 
+// Encoder pin definitions for drive and steering wheels (replace as per setup)
+#define FL_DRIVE_ENC_A 0
+#define FL_DRIVE_ENC_B 1
+#define FR_DRIVE_ENC_A 15
+#define FR_DRIVE_ENC_B 14
+#define RL_DRIVE_ENC_A 21
+#define RL_DRIVE_ENC_B 20
+#define RR_DRIVE_ENC_A 28
+#define RR_DRIVE_ENC_B 29
 
-#define FL_ENC_A 0
-#define FL_ENC_B 1
-#define FR_ENC_A 15
-#define FR_ENC_B 14
-#define RL_ENC_A 21
-#define RL_ENC_B 20
-#define RR_ENC_A 28
-#define RR_ENC_B 29
-#define SFL_ENC_A 7
-#define SFL_ENC_B 8
-#define SFR_ENC_A 16
-#define SFR_ENC_B 17
-#define SRL_ENC_A 25
-#define SRL_ENC_B 24
-#define SRR_ENC_A 34
-#define SRR_ENC_B 35
+#define FL_STEER_ENC_A 7
+#define FL_STEER_ENC_B 8
+#define FR_STEER_ENC_A 16
+#define FR_STEER_ENC_B 17
+#define RL_STEER_ENC_A 25
+#define RL_STEER_ENC_B 24
+#define RR_STEER_ENC_A 34
+#define RR_STEER_ENC_B 35
+
 
 // --- Motor Driver Pins ---
 #define FL_DRIVE_PWM 3
@@ -73,15 +113,15 @@ rcl_allocator_t allocator;
 rclc_support_t support;
 rcl_node_t node;
 const int K_P = 278;
-double basePWM=0;
+double basepwm=0;
 double vx=0,vy=0,omega=0;
 
 // Y-intercept for the PWM-Linear Velocity relationship for the robot
 const int b = 52;
 // Odometry variables
-nav_msgs__msg__Odometry odom_msg;
-float x = 0.0, y = 0.0, theta = 0.0;
-unsigned long last_time = 0;
+
+bool forward;
+bool busy;
 
 // Motor parameters
 int ticks_left_front = 0, ticks_right_front = 0, ticks_left_rear = 0, ticks_right_rear = 0;
@@ -92,144 +132,266 @@ double fl_speed, fr_speed, rl_speed, rr_speed;
 double fl_angle, fr_angle, rl_angle, rr_angle;
 
 
-// --- Motor Control Functions ---
-void setDriveMotor(CytronMD& motor, int pwm_pin, int dir_pin, double speed) {
-    basePWM = K_P * fabs(speed) + b;
-    speed = constrain(basePWM, 0, MAX_PWM);
-    // Adjust motor direction and speed based on the PWM signal
-    if (vx >= 0 && vy==0 && omega==0) {
-        digitalWrite(dir_pin, HIGH);     // Set motor speed forward
- // Forward direction
-        motor.setSpeed(speed);   
-    } else if (vx < 0 && vy==0 && omega==0) {
-        digitalWrite(dir_pin, LOW);  // Reverse direction
-  // Reverse direction
-        motor.setSpeed(-speed);  
-            // Set motor speed in reverse (assuming negative speed means reverse)
-    } else   if (vy >= 0 && vx==0 && omega==0) {
-        digitalWrite(dir_pin, HIGH);     // Set motor speed forward
- // Forward direction
-        motor.setSpeed(speed);   
-    } else if (vy < 0 && vx==0 && omega==0) {
-        digitalWrite(dir_pin, LOW);  // Reverse direction
-  // Reverse direction
-        motor.setSpeed(-speed);  
-            // Set motor speed in reverse (assuming negative speed means reverse)
-    } else    if (omega >= 0 && vy==0 && vx==0) {
-        digitalWrite(dir_pin, HIGH);     // Set motor speed forward
- // Forward direction
-        motor.setSpeed(speed);   
-    } else if (omega < 0 && vy==0 && vx==0) {
-        digitalWrite(dir_pin, LOW);  // Reverse direction
-  // Reverse direction
-        motor.setSpeed(-speed);  
-            // Set motor speed in reverse (assuming negative speed means reverse)
-    }  else {
-        motor.setSpeed(0);           // Stop the motor if speed is zero
+void setDriveMotor(int pwm_pin, int dir_pin, double speed) {
+    if (speed >= 0) {
+        digitalWrite(dir_pin, HIGH);
+        analogWrite(pwm_pin, 180);
+    } else if(speed<0) {
+        digitalWrite(dir_pin, LOW);
+        speed = -speed;
+        analogWrite(pwm_pin, -180);
+    }else{
+      analogWrite(pwm_pin, 0);
     }
-
-    // Ensure the speed is within bounds
+    speed = constrain(speed, 0, MAX_PWM);
+    //analogWrite(pwm_pin, speed);
 }
 
 
-void setSteerMotor(int pwm_pin, int dir_pin, double target_angle) {
-    // Assuming the current angle is a global variable or can be retrieved.
-    static double current_angle = 0.0;  // Replace with actual current angle if available.
-    
-    // Calculate the error between the current angle and the target angle
-    double error = target_angle - current_angle;
-    
-    // Check if we are close enough to the target angle
-    const double tolerance = 0.05; // Define a small tolerance to stop the motor when close enough
+void startMotor(Motor &motor, int32_t delta) {
+    noInterrupts();
+    motor.startTicks = *(motor.ticks);
+    motor.targetTicks = motor.startTicks + delta;
+    interrupts();
 
-    if (fabs(error) > tolerance) {
-        // Move the motor towards the target angle
-        int pwm_value = map(target_angle * 100, -PI * 100, PI * 100, 0, MAX_PWM);
-        pwm_value = constrain(pwm_value, 0, MAX_PWM);
+    bool forward = (delta > 0);
+    digitalWrite(motor.dir_pin, forward ? HIGH : LOW);
+    analogWrite(motor.pwm_pin, SPEED_PWM);
+    motor.moving = true;
+}
+// Assume you have defined your motors array with proper initialization:
+Motor motors[4] = {
+    { FL_STEER_PWM, FL_STEER_DIR, &steer_ticks[0], 0, 0, false },
+    { FR_STEER_PWM, FR_STEER_DIR, &steer_ticks[1], 0, 0, false },
+    { RL_STEER_PWM, RL_STEER_DIR, &steer_ticks[2], 0, 0, false },
+    { RR_STEER_PWM, RR_STEER_DIR, &steer_ticks[3], 0, 0, false }
+};
+float mapRange(float value, float in_min, float in_max, float out_min, float out_max) {
+    return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
-        // Apply PWM to the motor
-        analogWrite(pwm_pin, pwm_value);
 
+// Function: Initiate motor movement by a given delta of encoder ticks.
+// --------------------
+void moveBy(int32_t delta, int pwm_pin, int dir_pin, volatile int32_t *msteer_ticks, Motor &motor) {
+    if (delta == 0) { 
+        Serial.println(F("↔ No movement needed."));
+        return;
+    }
+    // Explanation: If the change is zero, nothing is done.
 
-        // Determine the direction of the motor
-        if (error > 0) {
-            digitalWrite(dir_pin, HIGH);  // Rotate in one direction
-        } else {
-            digitalWrite(dir_pin, LOW);   // Rotate in the opposite direction
-        }
+    noInterrupts();
+    motor.startTicks = *msteer_ticks;
+    motor.targetTicks = motor.startTicks + delta;
+    interrupts();
+    // Explanation: Record the starting ticks and compute the target tick value.
 
-        // Optionally, update the current angle based on motor movement (if you have an encoder or some feedback)
-        current_angle += error * 0.1;  // Adjust based on your control system
+    //bool forward = (delta > 0);
+    digitalWrite(dir_pin, forward ? HIGH : LOW);
+    if (forward == HIGH)
+        analogWrite(pwm_pin, SPEED_PWM);
+    else
+        analogWrite(pwm_pin, -SPEED_PWM);      
+    motor.moving = true;
+    // Explanation: Set the motor direction and start that motor at a certain speed.
+}
+
+// Assuming STEER_TICKS_PER_REV is defined elsewhere (e.g., 1024)
+// and the Motor structure, steer_ticks[] array, and motors[] array are already declared.
+
+const int32_t TICK_DEADBAND = 3;  // Threshold for correcting small errors.
+const int32_t MIN_STEER_TICKS = -30000;                  // Corresponds to -90°.
+const int32_t MAX_STEER_TICKS = 30000;  // Corresponds to +90°.
+
+// Synchronize all four steering motors so that their encoder ticks are close to each other.
+// This function computes the average encoder tick of all motors and commands any motor
+// that is too far away from that average (beyond the deadband) to move toward it.
+void syncSteerMotors() {
+  int32_t sum = 0;
+  // Get the current tick readings from all four motors.
+  for (int i = 0; i < 3; i++) {
+    noInterrupts();
+    int32_t t = steer_ticks[i];
+    interrupts();
+    sum += t;
+  }
+  int32_t avg = sum / 3;
+  Serial.print("Synchronizing. Average tick = ");
+  Serial.println(avg);
+  
+  // For each motor, if its tick reading differs by more than TICK_DEADBAND from the average,
+  // command that motor to adjust.
+  for (int i = 0; i < 3; i++) {
+    noInterrupts();
+    int32_t current = steer_ticks[i];
+    interrupts();
+    int32_t delta = avg - current;
+    if (abs(delta) >= TICK_DEADBAND) {
+      // Compute a new target but clamp it to allowed range.
+      int32_t target = current + delta;
+      if (target < MIN_STEER_TICKS) target = MIN_STEER_TICKS;
+      if (target > MAX_STEER_TICKS) target = MAX_STEER_TICKS;
+      delta = target - current;  // Re-calc the final delta.
+      if (delta != 0) {
+        Serial.print("Motor ");
+        Serial.print(i);
+        Serial.print(" synchronizing by delta: ");
+        Serial.println(delta);
+        moveBy(delta, motors[i].pwm_pin, motors[i].dir_pin, motors[i].ticks, motors[i]);
+      }
+    }
+  }
+}
+
+// Set the steering motors to the desired target angle.
+// The input 'anglee' is in degrees and is clamped to [-90, 90].
+// (Note: With our mapping, -90° → 0 ticks and +90° → STEER_TICKS_PER_REV.
+//  Thus, 0° corresponds to STEER_TICKS_PER_REV/2.)
+void setSteerAngle(int anglee) {
+  // Make sure the desired angle is within bounds.
+  if (anglee > 90) anglee = 90;
+  if (anglee < -90) anglee = -90;
+  
+  // Convert the target angle to an absolute encoder tick value.
+  int32_t desiredTicks = (int32_t) round((anglee + 90.0) * STEER_TICKS_PER_REV / 180.0);
+  Serial.print("Setting steer angle ");
+  Serial.print(anglee);
+  Serial.print("° (mapped to ticks: ");
+  Serial.print(desiredTicks);
+  Serial.println(")");
+  
+  // For each steering motor, compute the difference between desired and current ticks,
+  // and command the motor to move if the difference is significant.
+  for (int i = 0; i < 4; i++) {
+    noInterrupts();
+    int32_t current = steer_ticks[i];
+    interrupts();
+    int32_t delta = desiredTicks - current;
+    if (abs(delta) >= TICK_DEADBAND) {
+      Serial.print("Motor ");
+      Serial.print(i);
+      Serial.print(" moving by delta: ");
+      Serial.println(delta);
+      moveBy(delta, motors[i].pwm_pin, motors[i].dir_pin, motors[i].ticks, motors[i]);
     } else {
-        // Stop the motor if we're close enough to the target angle
-        analogWrite(pwm_pin, 0);
+      Serial.print("Motor ");
+      Serial.print(i);
+      Serial.println(" within deadband; no movement needed.");
     }
+  }
+}
+
+// Example control function that might be called from your joystick callback.
+// This function first synchronizes the steering motors, then moves them to the desired target.
+// If there is no joystick input, then 'anglee' should be zero (center).
+void updateSteering(int anglee) {
+  // First, synchronize the steering motors so their encoder readings are aligned.
+  syncSteerMotors();
+  
+  // Next, command all steering motors to reach the target angle.
+  setSteerAngle(anglee);
 }
 
 
-
-
-// --- Swerve Kinematics ---
-void calculateSwerve(double vx, double vy, double omega) {
-    double A = vx - omega * (TRACK_WIDTH / 2);
-    double B = vx + omega * (TRACK_WIDTH / 2);
-    double C = vy - omega * (WHEEL_BASE / 2);
-    double D = vy + omega * (WHEEL_BASE / 2);
-
-    // Compute wheel speeds
-    fl_speed = sqrt(B * B + D * D);
-    fr_speed = sqrt(B * B + C * C);
-    rl_speed = sqrt(A * A + D * D);
-    rr_speed = sqrt(A * A + C * C);
-
-    // Compute wheel angles (steering)
-    fl_angle = atan2(D, B);
-    fr_angle = atan2(C, B);
-    rl_angle = atan2(D, A);
-    rr_angle = atan2(C, A);
-
-    // Normalize speed if needed
-    double max_speed = max(max(fl_speed, fr_speed), max(rl_speed, rr_speed));
-    if (max_speed > MAX_PWM) {
-        fl_speed = (fl_speed / max_speed) * MAX_PWM;
-        fr_speed = (fr_speed / max_speed) * MAX_PWM;
-        rl_speed = (rl_speed / max_speed) * MAX_PWM;
-        rr_speed = (rr_speed / max_speed) * MAX_PWM;
-    }
-}
-
-
-// --- ROS Callback ---
 geometry_msgs__msg__Twist cmd_vel_msg;
-
+// --- Example ROS Callback snippet ---
+// (Assume that mapping from joystick input to 'anglee' has been done elsewhere.)
 void cmd_vel_callback(const void *msg_in) {
-    const geometry_msgs__msg__Twist *cmd = (const geometry_msgs__msg__Twist *)msg_in;
+  const geometry_msgs__msg__Twist *cmd = (const geometry_msgs__msg__Twist *)msg_in;
+  
+  // Map joystick input (assumed here to be cmd->linear.y) to an angle (–90° to 90°):
+  float vy = cmd->linear.y;   // Expected range: -1.0 to 1.0.
+  float anglee = mapRange(vy, -1.0, 1.0, -90.0, 90.0);
+  
+  // For a neutral joystick (or very near zero), you want the steer motors to center (0°).
+  if (fabs(vy) < 0.05) {
+    anglee = 0; // Center position.
+  }
+  
+
+  // (Optional) Ensure you only call steering if the command has changed significantly.
+  // Otherwise, repeated identical commands might trigger unnecessary movements.
+  // Here you could compare anglee with a stored "lastCommandedAngle" and only update if changed.
+  
+  Serial.print("Joystick mapped to steer angle: ");
+  Serial.println(anglee);
+  
+  // Update the steering system.
+  updateSteering((int)anglee);
+
+
+    if (vy>0)
+    forward = HIGH;
+    else
+    forward=LOW;
 
      vx = cmd->linear.x;   // Joystick forward/backward
-     vy = cmd->linear.y;   // Joystick sideways strafing
+
      omega = cmd->angular.z; // Joystick rotation
-    
-    calculateSwerve(vx, vy, omega);
-    if(basePWM<0){
+    basepwm = K_P *vx +b;
+
+  checkSteerLimits();
+    if(vx<0){
   digitalWrite(ledPin, HIGH);   // set the LED on
     }else{
   digitalWrite(ledPin, LOW);   // set the LED on
-
     }
+    if(vx>0 && vy>0 || vx>0 && vy<0){
+        busy=HIGH;
     // Set Drive Motors (wheel speeds)
-    setDriveMotor(motor1, FL_DRIVE_PWM, FL_DRIVE_DIR, fl_speed);
-    setDriveMotor(motor2, FR_DRIVE_PWM, FR_DRIVE_DIR, fr_speed);
-    setDriveMotor(motor3, RL_DRIVE_PWM, RL_DRIVE_DIR, rl_speed);
-    setDriveMotor(motor4, RR_DRIVE_PWM, RR_DRIVE_DIR, rr_speed);
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, basepwm);
+    setSteerAngle(anglee);
+    }else if(vx<0 && vy<0 || vx<0 && vy>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    setSteerAngle(anglee);      
+        busy=HIGH;
 
-    // Set Steering Motors (wheel angles)
-    setSteerMotor(FL_STEER_PWM, FL_STEER_DIR, fl_angle);
-    setSteerMotor(FR_STEER_PWM, FR_STEER_DIR, fr_angle);
-    setSteerMotor(RL_STEER_PWM, RL_STEER_DIR, rl_angle);
-    setSteerMotor(RR_STEER_PWM, RR_STEER_DIR, rr_angle);
+    }else if(vx>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, basepwm);
+    
+    }else if(vx<0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    }else if(vy>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    setSteerAngle(anglee);  
+        busy=HIGH;
 
-    // Stop drive motors when joystick is neutral
-    if (vx == 0 && vy == 0 && omega == 0) {
+    }else if(vy<0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, basepwm);
+    setSteerAngle(anglee);  
+        busy=HIGH;
+
+    }else if(omega>0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    setSteerAngle(60);      
+    }else if(omega<0){
+    setDriveMotor(FL_DRIVE_PWM, FL_DRIVE_DIR, -basepwm);
+    setDriveMotor(FR_DRIVE_PWM, FR_DRIVE_DIR, -basepwm);
+    setDriveMotor(RL_DRIVE_PWM, RL_DRIVE_DIR, -basepwm);
+    setDriveMotor(RR_DRIVE_PWM, RR_DRIVE_DIR, -basepwm);
+    setSteerAngle(60);   
+    }else{
         analogWrite(FL_DRIVE_PWM, 0);
         analogWrite(FR_DRIVE_PWM, 0);
         analogWrite(RL_DRIVE_PWM, 0);
@@ -237,72 +399,58 @@ void cmd_vel_callback(const void *msg_in) {
         analogWrite(FL_STEER_PWM, 0);
         analogWrite(FR_STEER_PWM, 0);
         analogWrite(RL_STEER_PWM, 0);
-        analogWrite(RR_STEER_PWM, 0);        
+        analogWrite(RR_STEER_PWM, 0);      
+        busy=LOW;
+
     }
+
+
 }
 
-void computeOdometry() {
+// Last known states for quadrature decoding (for drive wheels)
+int last_drive_val[4] = {HIGH, HIGH, HIGH, HIGH};
 
-  unsigned long current_time = millis();
-  float dt = (current_time - last_time) / 1000.0; // Time in seconds
-  
-  // Calculate velocities for each wheel
-  float v_LF = ticks_left_front * 2 * PI * WHEEL_RADIUS / TICKS_PER_REV;
-  float v_RF = ticks_right_front * 2 * PI * WHEEL_RADIUS / TICKS_PER_REV;
-  float v_LR = ticks_left_rear * 2 * PI * WHEEL_RADIUS / TICKS_PER_REV;
-  float v_RR = ticks_right_rear * 2 * PI * WHEEL_RADIUS / TICKS_PER_REV;
-  
-  // Robot's velocities in robot frame (holonomic robot)
-    // Wheel angles (assuming 45-degree swerve modules)
-    float alpha_FL = fl_angle;
-    float alpha_FR = fr_angle;
-    float alpha_RL = rl_angle;
-    float alpha_RR = rr_angle;
+// Last known states for quadrature decoding (for steer wheels)
+int last_steer_val[4] = {HIGH, HIGH, HIGH, HIGH};
 
-    // Compute velocities in the robot frame
-    float v_x = (v_LF * cos(alpha_FL) + v_RF * cos(alpha_FR) + v_LR * cos(alpha_RL) + v_RR * cos(alpha_RR)) / 4.0;
-    float v_y = (v_LF * sin(alpha_FL) + v_RF * sin(alpha_FR) + v_LR * sin(alpha_RL) + v_RR * sin(alpha_RR)) / 4.0;
-    float odom_omega = ((v_RF - v_LF) + (v_RR - v_LR)) / (2 * WHEEL_BASE); // Rotational velocity based on wheel movement differences
+// Interrupt service routines for drive and steer wheels
+void encoderDriveFL() { update_wheel_tick(0, FL_DRIVE_ENC_A, FL_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+void encoderDriveFR() { update_wheel_tick(1, FR_DRIVE_ENC_A, FR_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+void encoderDriveRL() { update_wheel_tick(2, RL_DRIVE_ENC_A, RL_DRIVE_ENC_B, drive_ticks, last_drive_val); }
+void encoderDriveRR() { update_wheel_tick(3, RR_DRIVE_ENC_A, RR_DRIVE_ENC_B, drive_ticks, last_drive_val); }
 
-    // Calculate the error between commanded velocities and computed velocities
-    float error_v_x = abs(vx - v_x);
-    float error_v_y = abs(vy - v_y);
-    float error_omega = abs(omega - odom_omega);
+void encoderSteerFL() { update_wheel_tick(0, FL_STEER_ENC_A, FL_STEER_ENC_B, steer_ticks, last_steer_val); }
+void encoderSteerFR() { update_wheel_tick(1, FR_STEER_ENC_A, FR_STEER_ENC_B, steer_ticks, last_steer_val); }
+void encoderSteerRL() { update_wheel_tick(2, RL_STEER_ENC_A, RL_STEER_ENC_B, steer_ticks, last_steer_val); }
+void encoderSteerRR() { update_wheel_tick(3, RR_STEER_ENC_A, RR_STEER_ENC_B, steer_ticks, last_steer_val); }
 
-    // Log errors
-    Serial.print("Error in linear velocity X: ");
-    Serial.println(error_v_x);
-    Serial.print("Error in linear velocity Y: ");
-    Serial.println(error_v_y);
-    Serial.print("Error in angular velocity: ");
-    Serial.println(error_omega);
-    delay(100);
-  // Update position and orientation using kinematics
-  x += v_x * cos(theta) * dt;
-  y += v_x * sin(theta) * dt;
-  theta += odom_omega * dt;
-  
-  // Prepare the odometry message
-  odom_msg.header.stamp.sec = current_time / 1000;
-  odom_msg.header.stamp.nanosec = (current_time % 1000) * 1000000;
-  odom_msg.pose.pose.position.x = x;
-  odom_msg.pose.pose.position.y = y;
-  odom_msg.pose.pose.orientation.z = sin(theta / 2);
-  odom_msg.pose.pose.orientation.w = cos(theta / 2);
-  
-  // Publish the odometry message
-  (void)rcl_publish(&odom_pub, &odom_msg, NULL);
+// Update tick count for the specified motor
+void update_wheel_tick(int index, int encoder_input1, int encoder_input2, int32_t *ticks, int *last_val) {
 
-  // Reset ticks for the next loop
-  ticks_left_front = 0;
-  ticks_right_front = 0;
-  ticks_left_rear = 0;
-  ticks_right_rear = 0;
-  
-  last_time = current_time;
-  
-  delay(100);  // Update rate (in milliseconds)
+  //static uint8_t last = 0;
+  uint8_t a = digitalRead(encoder_input1), b = digitalRead(encoder_input2);
+  uint8_t curr = (a << 1) | b;
+  uint8_t sum  = ( last_val[index] << 2) | curr;
+  if (sum==0b1101||sum==0b0100||sum==0b0010||sum==0b1011) ticks[index]++;
+  else if (sum==0b1110||sum==0b0111||sum==0b0001||sum==0b1000) ticks[index]--;
+  last_val[index] = curr;
 }
+
+
+// Publish tick counts
+void publish_ticks() {
+    tick_msg.data.size = 8;
+    tick_msg.data.data = (int32_t*)malloc(sizeof(int32_t) * 8);
+
+    for (int i = 0; i < 4; i++) {
+        tick_msg.data.data[i] = drive_ticks[i];
+        tick_msg.data.data[i + 4] = steer_ticks[i];
+    }
+
+    rcl_publish(&tick_publisher, &tick_msg, NULL);
+    free(tick_msg.data.data);
+}
+
 
 // --- Setup ---
 void setup() {
@@ -321,22 +469,40 @@ void setup() {
     pinMode(RR_STEER_DIR, OUTPUT);
 
 
-    // Encoder pin setup
-    pinMode(FL_ENC_A, INPUT);
-    pinMode(FL_ENC_B, INPUT);
-    attachInterrupt(digitalPinToInterrupt(FL_ENC_A), encoderLeftFront, CHANGE);
+    // Drive Encoder Pin Setup
+    pinMode(FL_DRIVE_ENC_A, INPUT);
+    pinMode(FL_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FL_DRIVE_ENC_A), encoderDriveFL, CHANGE);
 
-    pinMode(FR_ENC_A, INPUT);
-    pinMode(FR_ENC_B, INPUT);
-    attachInterrupt(digitalPinToInterrupt(FR_ENC_A), encoderRightFront, CHANGE);
+    pinMode(FR_DRIVE_ENC_A, INPUT);
+    pinMode(FR_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FR_DRIVE_ENC_A), encoderDriveFR, CHANGE);
 
-    pinMode(RL_ENC_A, INPUT);
-    pinMode(RL_ENC_B, INPUT);
-    attachInterrupt(digitalPinToInterrupt(RL_ENC_A), encoderLeftRear, CHANGE);
+    pinMode(RL_DRIVE_ENC_A, INPUT);
+    pinMode(RL_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RL_DRIVE_ENC_A), encoderDriveRL, CHANGE);
 
-    pinMode(RR_ENC_A, INPUT);
-    pinMode(RR_ENC_B, INPUT);
-    attachInterrupt(digitalPinToInterrupt(RR_ENC_A), encoderRightRear, CHANGE);
+    pinMode(RR_DRIVE_ENC_A, INPUT);
+    pinMode(RR_DRIVE_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RR_DRIVE_ENC_A), encoderDriveRR, CHANGE);
+
+    // Steer Encoder Pin Setup
+    pinMode(FL_STEER_ENC_A, INPUT);
+    pinMode(FL_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FL_STEER_ENC_A), encoderSteerFL, CHANGE);
+
+    pinMode(FR_STEER_ENC_A, INPUT);
+    pinMode(FR_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(FR_STEER_ENC_A), encoderSteerFR, CHANGE);
+
+    pinMode(RL_STEER_ENC_A, INPUT);
+    pinMode(RL_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RL_STEER_ENC_A), encoderSteerRL, CHANGE);
+
+    pinMode(RR_STEER_ENC_A, INPUT);
+    pinMode(RR_STEER_ENC_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RR_STEER_ENC_A), encoderSteerRR, CHANGE);
+
 
     allocator = rcl_get_default_allocator();
     rclc_support_init(&support, 0, NULL, &allocator);
@@ -346,20 +512,106 @@ void setup() {
     rclc_publisher_init_default(&odom_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "/odom");
 
 
+    rclc_publisher_init_default(&tick_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray), "motor_ticks");
+
+    tick_msg.data.capacity = 8;
+    tick_msg.data.size = 0;
+    tick_msg.data.data = NULL;
+
     rclc_executor_init(&executor, &support.context, 2, &allocator);
     rclc_executor_add_subscription(&executor, &cmd_vel_sub, &cmd_vel_msg, cmd_vel_callback, ON_NEW_DATA);
 
   }
-    // set the LED on
-void encoderLeftFront() { ticks_left_front++; }
-void encoderRightFront() { ticks_right_front++; }
-void encoderLeftRear() { ticks_left_rear++; }
-void encoderRightRear() { ticks_right_rear++; }
+
+
+    int32_t savedSteerTicks[4] = {0, 0, 0, 0};// set the LED on
+void checkSteerLimits() {
+  for (int i = 0; i < 4; i++) {
+    noInterrupts();
+    int32_t currentTicks = steer_ticks[i];
+    interrupts();
+
+    if (currentTicks < MIN_STEER_TICKS) {
+      Serial.print("Warning: Motor ");
+      Serial.print(i);
+      Serial.print(" tick value (");
+      Serial.print(currentTicks);
+      Serial.println(") below lower limit.");
+      
+      // Save the safe value (lower limit) for recovery.
+      savedSteerTicks[i] = MIN_STEER_TICKS;
+      
+      // Stop the motor by writing 0 to its PWM output.
+      analogWrite(motors[i].pwm_pin, 0);
+      motors[i].moving = false;
+    }
+    else if (currentTicks > MAX_STEER_TICKS) {
+      Serial.print("Warning: Motor ");
+      Serial.print(i);
+      Serial.print(" tick value (");
+      Serial.print(currentTicks);
+      Serial.println(") above upper limit.");
+      
+      // Save the safe value (upper limit) for recovery.
+      savedSteerTicks[i] = MAX_STEER_TICKS;
+      
+      // Stop the motor.
+      analogWrite(motors[i].pwm_pin, 0);
+      motors[i].moving = false;
+    }
+  }
+}
+
+// --------------------------------------------------------------------
+// Function: recoverSteerPosition
+// If the global variable 'busy' is true, this function commands each steering motor
+// to "go back" by the difference (in encoder ticks) between its saved (safe) tick value 
+// and its current tick value.
+// After recovery, busy is reset to false.
+// --------------------------------------------------------------------
+void recoverSteerPosition() {
+  if (!busy)
+    return;
+  
+  Serial.println("Recovering steering positions...");
+  
+  for (int i = 0; i < 4; i++) {
+    noInterrupts();
+    int32_t current = steer_ticks[i];
+    interrupts();
+    
+    // Calculate how many ticks to recover (move in the reverse direction).
+    int32_t delta = -savedSteerTicks[i];
+    if (abs(delta) >= TICK_DEADBAND) {
+      Serial.print("Motor ");
+      Serial.print(i);
+      Serial.print(" recovering by delta: ");
+      Serial.println(delta);
+      moveBy(delta, motors[i].pwm_pin, motors[i].dir_pin, motors[i].ticks, motors[i]);
+    }
+    else {
+      Serial.print("Motor ");
+      Serial.print(i);
+      Serial.println(" recovery not needed (within deadband).");
+    }
+  }
+  
+  // Once recovery commands are issued, reset the busy flag.
+  busy = false;
+}
 
 // --- Loop ---
 void loop() {
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
-    computeOdometry();
-    //set_pwm();
+    //computeOdometry();
+    publish_ticks();
+ //   if (busy==LOW)
+   // updateSteering(0);
+     // Regularly check if any steering motor's encoder tick is out of bounds.
+
+  // If (for example) a limit was exceeded and busy has been set true,
+  // call recoverSteerPosition() to move motors back to their safe (saved) tick values.
+  recoverSteerPosition();
+
 
 }
